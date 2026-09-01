@@ -10,6 +10,8 @@ A lightweight **desktop floating widget + local proxy** that tracks token usage 
 many tokens each conversation costs — per model, per day, or per provider — without
 touching WorkBuddy internals.
 
+**[简体中文](./README.zh-CN.md)** · English
+
 ---
 
 ## Features
