@@ -1,0 +1,62 @@
+{
+  "_comment": "token-proxy 配置。价格单位：元/百万 token。增删模型/改价直接编辑此文件后重启代理，或后续走 /config 热加载。providers 的 keys 为渠道可切换的 API key（activeKey 为当前生效项），转发时用 activeKey 覆盖客户端 Authorization 头。",
+  "models": {
+    "deepseek-v4-flash": {
+      "provider": "b.ai",
+      "price": {
+        "input": 2.0,
+        "output": 8.0,
+        "cache_read": 0.5
+      }
+    },
+    "deepseek-v4-flash-0731": {
+      "provider": "aliyun",
+      "price": {
+        "input": 2.0,
+        "output": 8.0,
+        "cache_read": 0.5
+      }
+    },
+    "deepseek-v4-flash-vision-exp": {
+      "provider": "b.ai",
+      "price": {
+        "input": 2.0,
+        "output": 8.0,
+        "cache_read": 0.5
+      }
+    }
+  },
+  "providers": {
+    "b.ai": {
+      "base": "https://api.b.ai/v1",
+      "label": "b.ai",
+      "proxy": "http://127.0.0.1:7897",
+      "keys": [
+        {
+          "id": "old",
+          "name": "旧key",
+          "key": "sk-REPLACE_WITH_YOUR_KEY"
+        },
+        {
+          "id": "new",
+          "name": "新key",
+          "key": "sk-REPLACE_WITH_YOUR_KEY"
+        }
+      ],
+      "activeKey": "new"
+    },
+    "aliyun": {
+      "base": "https://llm-061p0s7xc7be60sv.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      "label": "aliyun",
+      "proxy": "auto",
+      "keys": [
+        {
+          "id": "default",
+          "name": "默认key",
+          "key": "sk-REPLACE_WITH_YOUR_KEY"
+        }
+      ],
+      "activeKey": "default"
+    }
+  }
+}
