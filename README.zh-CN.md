@@ -100,17 +100,31 @@ Windows 上也可直接双击 `token-proxy/start_dev.bat` 以可见窗口运行�
 
 ## 构建与发布
 
-```bash
-# 后端 → 独立 exe
-cd token-proxy
-pyinstaller -F -n token-proxy main.py
-cp dist/token-proxy.exe ../token-widget/src-tauri/resources/
+> **安全提示** — 安装包会把 `resources/config.json` 一并打包。为避免泄露你的真实
+> API key，发布构建**必须**走 `build_release.bat`（自动完成：备份私有配置 → 换成
+> 脱敏的 `config.example.json` → 构建 → 恢复）。绝不要在包含真实 key 的配置上直接
+> 执行 `tauri build`。
 
-# 前端 → 安装包
-cd ../token-widget
-npm run build
-npm run tauri build        # NSIS 安装包在 src-tauri/target/release/bundle/
+```bat
+build_release.bat
 ```
+
+构建产物：
+
+- `token-proxy/dist/token-proxy.exe` — 独立代理程序（PyInstaller）
+- `token-widget/src-tauri/target/release/bundle/nsis/token-widget_0.1.0_x64-setup.exe` — NSIS 安装包
+- `token-widget/src-tauri/target/release/bundle/msi/token-widget_0.1.0_x64_en-US.msi` — MSI 安装包
+
+上传到 GitHub Release：
+
+```bash
+gh release upload v0.1.0 token-proxy/dist/token-proxy.exe \
+  token-widget/src-tauri/target/release/bundle/nsis/token-widget_0.1.0_x64-setup.exe \
+  token-widget/src-tauri/target/release/bundle/msi/token-widget_0.1.0_x64_en-US.msi
+```
+
+> 安装包内置占位 key（`sk-REPLACE_WITH_YOUR_KEY`），用户安装后需在 widget 设置
+> 面板填入自己的 key 才能使用。
 
 ## 仓库结构
 

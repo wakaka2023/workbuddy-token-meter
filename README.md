@@ -104,17 +104,31 @@ with a visible console window.
 
 ## Build & Release
 
-```bash
-# backend → standalone exe
-cd token-proxy
-pyinstaller -F -n token-proxy main.py
-cp dist/token-proxy.exe ../token-widget/src-tauri/resources/
+> **Security note** — the installer embeds `resources/config.json`. To avoid shipping
+> your real API keys, always build releases through `build_release.bat` (it backs up
+> the private config, swaps in the sanitized `config.example.json`, builds, then
+> restores). Never run `tauri build` directly on a config that contains real keys.
 
-# frontend → installer
-cd ../token-widget
-npm run build
-npm run tauri build        # NSIS installer under src-tauri/target/release/bundle/
+```bat
+build_release.bat
 ```
+
+Artifacts:
+
+- `token-proxy/dist/token-proxy.exe` — standalone proxy binary (PyInstaller)
+- `token-widget/src-tauri/target/release/bundle/nsis/token-widget_0.1.0_x64-setup.exe` — NSIS installer
+- `token-widget/src-tauri/target/release/bundle/msi/token-widget_0.1.0_x64_en-US.msi` — MSI installer
+
+Upload them to a GitHub release with:
+
+```bash
+gh release upload v0.1.0 token-proxy/dist/token-proxy.exe \
+  token-widget/src-tauri/target/release/bundle/nsis/token-widget_0.1.0_x64-setup.exe \
+  token-widget/src-tauri/target/release/bundle/msi/token-widget_0.1.0_x64_en-US.msi
+```
+
+> The bundled config ships with a placeholder key (`sk-REPLACE_WITH_YOUR_KEY`).
+> Users must configure their own keys in the widget settings panel after install.
 
 ## Repository Layout
 
