@@ -83,11 +83,15 @@ export type CacheScope = "today" | "model";
 export type SettingsTab = "appearance" | "channels" | "models" | "scan" | "config";
 
 export interface ProxyStatus {
+  running: boolean; // 代理进程是否存活（/health 校验过）
+  needed: boolean; // models.json 是否存在走代理路由的自定义模型
   mode: "service" | "full";
   port: number;
   forwarded: number;
   uptime: number;
   has_key: boolean;
+  config_channels: number; // 本地 config.json 计数（判断是否仅统计模式）
+  config_models: number;
 }
 
 export interface RouteModel {

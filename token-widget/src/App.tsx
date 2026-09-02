@@ -27,7 +27,6 @@ import {
   MINI_SIZE,
   POLL_KEY,
   POLL_MS,
-  PROXY,
   THEME_BG_RGB,
   THEME_KEY,
   acrylicAlpha,
@@ -207,7 +206,7 @@ function App() {
     try {
       const s = await modeStart();
       setStatus(s);
-      setOpMsg("代理已启动（full 模式）");
+      setOpMsg("代理已启动");
     } catch (e) {
       setOpMsg(`启动失败：${e instanceof Error ? e.message : String(e)}`);
     }
@@ -217,7 +216,7 @@ function App() {
     try {
       const s = await modeStop();
       setStatus(s);
-      setOpMsg("代理已停止（service 模式）");
+      setOpMsg("代理已停止（仅统计模式不受影响）");
     } catch (e) {
       setOpMsg(`停止失败：${e instanceof Error ? e.message : String(e)}`);
     }
@@ -317,7 +316,7 @@ function App() {
     }
     // 空保护：没有任何渠道/模型时拒绝保存，防止空配置覆盖真实配置
     if (channels.length === 0 && models.length === 0) {
-      setSaveMsg("配置为空，未执行保存（避免覆盖已有配置）");
+      setSaveMsg("暂无渠道/模型可保存：仅统计模式无需配置；如需转发请先一键导入或添加渠道");
       return;
     }
     setSaving(true);
@@ -382,6 +381,22 @@ function App() {
   })();
 
   const miniFailed = mode === "mini" && lastRec ? lastRec.ok === false : false;
+
+  // 状态栏文案：区分「代理运行 / 需要代理但未启动 / 仅统计模式（无需代理）」
+  const configEmpty =
+    status === null || (status.config_channels === 0 && status.config_models === 0);
+  const statusText = (() => {
+    if (online === null) return "连接中…";
+    if (!online) return "本地引擎未就绪";
+    if (!status) return "";
+    if (status.running) {
+      return status.mode === "full"
+        ? `代理转发中 · 端口 ${status.port}`
+        : "代理运行中（未配置转发 key）";
+    }
+    if (status.needed) return "代理未启动（检测到走代理模型）";
+    return configEmpty ? "仅统计模式（内置模型）" : "仅统计模式";
+  })();
 
   return (
     <div className={`widget mode-${mode} theme-${theme}${miniFailed ? " mini-failed" : ""}`}>
@@ -470,13 +485,11 @@ function App() {
       {mode === "expanded" && (
         <footer className="statusbar">
           <span className={`dot ${online === false ? "err" : "ok"}`} />
-          {online === null
-            ? "连接中…"
-            : online
-              ? `代理正常 · ${status?.mode === "full" ? "转发中" : "待配置"}`
-              : `无法连接 ${PROXY}`}
+          <span>{statusText}</span>
           <span className="status-right">
-            {status ? `mode:${status.mode} · 转发:${status.forwarded}` : ""}
+            {status
+              ? `渠道 ${status.config_channels} · 模型 ${status.config_models}`
+              : ""}
             {pollMs / 1000}s
           </span>
         </footer>

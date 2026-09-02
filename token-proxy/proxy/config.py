@@ -31,6 +31,9 @@ MODELS_JSON = os.path.join(os.path.expanduser("~"), ".workbuddy", "models.json")
 # 运行模式：service（扫描/统计可用，转发停用）→ full（配置 key 后转发启用）
 # 环境变量 TOKEN_PROXY_MODE=full 可强制 full（打包版 widget 拉起时按需传）
 MODE = "full" if os.environ.get("TOKEN_PROXY_MODE", "").strip().lower() == "full" else "service"
+# v0.2.4：widget 拉起时传 LEAN=1 —— 统计/配置/扫描已移到 widget 本地（Rust），
+# 代理只做转发；lean 下不初始化 trace 缓存/扫描线程，避免与 widget 引擎双写缓存。
+LEAN = os.environ.get("TOKEN_PROXY_LEAN", "").strip() == "1"
 _started_at = time.time()
 _forwarded = 0  # 本次会话转发请求数
 
@@ -106,13 +109,31 @@ def _load_config():
     _config.setdefault("models", {})
 
 
+_loaded_mtime = None
+
+
+def _reload_if_changed():
+    """v0.2.4：widget 本地直接改写 config.json。转发/状态前按 mtime 检测并热载，
+    保证运行中的代理立即用上最新 key/渠道/模型，无需重启。"""
+    global _loaded_mtime
+    try:
+        mt = os.stat(CONFIG_FILE).st_mtime
+    except OSError:
+        return
+    if _loaded_mtime is None or mt != _loaded_mtime:
+        _load_config()
+        _loaded_mtime = mt
+
+
 def _channel(name):
     """渠道配置行；未登记返回空 dict。"""
+    _reload_if_changed()
     return (_config.get("channels") or {}).get(name) or {}
 
 
 def _model(model):
     """模型配置行；未登记返回空 dict。若 model 不是 models 字典的键，按 name 字段反向匹配（兼容 WorkBuddy 用显示名请求的场景）。"""
+    _reload_if_changed()
     models = _config.get("models") or {}
     m = models.get(model)
     if m is not None:
@@ -126,6 +147,7 @@ def _model(model):
 def _resolve_model_id(model):
     """请求 model 名 -> 配置模型键（id）。若请求用 name（显示名）反查命中，返回真正的 id 键，
     转发时据此把 body.model 替换成 id，避免上游收到显示名而 404。未命中返回原 model。"""
+    _reload_if_changed()
     models = _config.get("models") or {}
     if model in models:
         return model
@@ -217,6 +239,7 @@ def _model_key(model):
 
 def _has_any_key():
     """任一渠道配置了真实 key → 可启动 full 模式。"""
+    _reload_if_changed()
     for ch in (_config.get("channels") or {}).values():
         for k in (ch.get("keys") or []):
             if k.get("key") and "REPLACE" not in k["key"]:

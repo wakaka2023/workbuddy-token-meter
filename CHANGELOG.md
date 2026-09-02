@@ -12,6 +12,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cost calculation with a multi-source price library
 - Sub-agent (expert team) token aggregation from `subagents/*.jsonl`
 
+## [0.2.4] - 2026-09-02
+
+### Changed
+
+- **Architecture: trace-first single-channel (stats no longer depend on the proxy)**.
+  The statistics engine and config management now live inside the Rust widget; the
+  Python proxy is demoted to an optional, on-demand forwarder. Users who only use
+  built-in WorkBuddy models run with **no proxy process and no open 8787 port** —
+  this fixes the v0.2.3 failure where stats/config/scan all broke when the proxy
+  could not start.
+  - New local Rust engine (`engine.rs`) scans `~/.workbuddy/traces` directly,
+    incremental `(mtime, size)` scan with `(traceId, spanId)` upsert dedup, and a
+    daily-shard cache marked `"engine":"widget-v1"` (old Python state ignored →
+    triggers one full rebuild). `snapshot()` keeps the exact legacy `/stats` JSON
+    contract, so the frontend stats views required zero changes.
+  - New local config store (`configstore.rs`) ports config / import / route-switch /
+    ledger from the Python side: masked responses, empty-payload guard, key ops,
+    WorkBuddy import, direct↔proxy model routing with 5-deep models.json backups.
+  - Proxy is launched on demand only when `models.json` contains a model routed to
+    `127.0.0.1:8787`, and liveness is verified via `/health` (fixes the old
+    "port occupied by another process = false alive" bug).
+  - Proxy runs in **lean mode** when spawned by the widget (`TOKEN_PROXY_LEAN=1`):
+    forwarding only, no trace-cache/scan threads (no double-writing the cache the
+    Rust engine now owns). Proxy config is hot-reloaded via mtime polling so
+    widget-written config applies to a running proxy.
+- **Empty default config**: both `config.example.json` files and the bundled
+  `resources/config.json` are now an empty template
+  (`{"channels": {}, "models": {}}`) — no template/placeholder keys to confuse
+  built-in-only users.
+- **Frontend rewired to Tauri commands**: stats/config/scan/ledger/route/key/proxy
+  control all call `invoke(...)` instead of HTTP against the proxy; only upstream
+  model discovery (`fetch_models`, which genuinely needs the proxy + a real key)
+  still uses HTTP, with a graceful `proxy_down` fallback.
+- Version bumped to 0.2.4.
+
+### Fixed
+
+- Model-name extraction from trace `toolInput`: the Rust engine now searches the
+  extracted system content for "powered by" instead of using the whole content as
+  the model name (no more multi-KB garbage names).
+- Non-ASCII model names (e.g. `GLM-5.3-Flash(B.AI测试)`) are no longer truncated
+  at the first UTF-8 continuation byte, so Chinese custom-model names match
+  `models.json` and are labeled as custom instead of `内置`.
+- `provider_from_url` falls back to `自定义` for local proxy hosts instead of
+  deriving a meaningless label.
+
 ## [0.2.3] - 2026-09-02
 
 ### Added

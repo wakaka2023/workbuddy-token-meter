@@ -138,7 +138,7 @@ function SettingsPanel({
         <span className={`save-msg ${saveMsg.startsWith("已保存") ? "ok" : ""}`}>
           {opMsg || saveMsg}
         </span>
-        <button className="cancel-btn" onClick={onRefresh} title="重新从代理拉取配置">
+        <button className="cancel-btn" onClick={onRefresh} title="重新读取本地配置">
           刷新配置
         </button>
         <button className="cancel-btn" onClick={onClose}>

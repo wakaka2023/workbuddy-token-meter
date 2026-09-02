@@ -13,19 +13,25 @@ export default function ConfigTab({ status, ledger, onModeStart, onModeStop }: P
       <div className="settings-title">代理运行状态</div>
       <div className="s-row">
         {status ? (
-          <>
-            <span className={`route-tag ${status.mode}`}>
-              {status.mode === "full" ? "转发中" : "待配置"}
-            </span>
-            <span className="hint">
-              端口 {status.port} · 转发 {status.forwarded} · 已运行 {Math.floor(status.uptime / 60)}m
-            </span>
-            {status.mode === "full" ? (
+          status.running ? (
+            <>
+              <span className={`route-tag ${status.mode}`}>
+                {status.mode === "full" ? "转发中" : "已运行"}
+              </span>
+              <span className="hint">
+                端口 {status.port} · 转发 {status.forwarded} · 已运行 {Math.floor(status.uptime / 60)}m
+              </span>
               <button className="add-btn" onClick={onModeStop}>停止代理</button>
-            ) : (
+            </>
+          ) : (
+            <>
+              <span className="route-tag service">未运行</span>
+              <span className="hint">
+                {status.needed ? "检测到走代理模型，建议启动" : "仅统计模式无需启动代理"}
+              </span>
               <button className="add-btn" onClick={onModeStart}>启动代理</button>
-            )}
-          </>
+            </>
+          )
         ) : (
           <span className="hint">无法获取代理状态</span>
         )}

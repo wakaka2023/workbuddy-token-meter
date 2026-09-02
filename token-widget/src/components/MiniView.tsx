@@ -62,7 +62,7 @@ function MiniView({ online, lastRec, cacheScope, todayCacheRate, modelTodayCache
           )}
         </div>
       ) : (
-        <div className="mini-empty">{online ? "等待请求…" : "代理未连接"}</div>
+        <div className="mini-empty">{online ? "等待请求…" : "引擎未就绪"}</div>
       )}
     </div>
   );

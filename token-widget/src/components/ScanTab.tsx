@@ -10,8 +10,8 @@ export default function ScanTab({ scanProgress, onScan }: Props) {
     <>
       <div className="settings-title">扫描统计（本地 trace 记账）</div>
       <p className="settings-desc">
-        扫描 WorkBuddy 本地 trace 文件，加载内置模型与直连自定义模型的用量。
-        首次约 8s，之后增量秒级；结果缓存在 %APPDATA% 的 trace-cache。
+        直接扫描 WorkBuddy 本地 trace 文件，内置与自定义模型统一按 generation 记账，
+        不依赖代理进程。首次全量稍慢，之后增量秒级；结果缓存在 %APPDATA% 下，重启秒级恢复。
       </p>
       <div className="s-row scan-actions">
         <button className="add-btn" onClick={() => onScan(false)}>增量扫描</button>
