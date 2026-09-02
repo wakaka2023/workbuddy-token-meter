@@ -5,30 +5,35 @@ from http.server import BaseHTTPRequestHandler
 
 import requests
 
-from . import config
+from . import config, ledger, route_switch, trace_cache
 from .aggregate import add_failed, add_usage, extract_usage, log_event
 from .config import (
     BACKOFF,
     CONFIG_FILE,
-    DEFAULT_ROUTE,
     MAX_ATTEMPTS,
     PORT,
     RETRYABLE,
-    ROUTES,
-    _active_key,
     _agg,
+    _channel,
     _lock,
     _mask_key,
-    _masked_providers,
-    _merge_providers_keys,
+    _masked_channels,
+    _masked_models,
+    _merge_channels_keys,
+    _merge_models_fields,
+    _model_base,
     _model_defaults,
+    _model_key,
+    _model_label,
     _model_price,
-    _provider,
+    _model_proxy,
+    _proxy_settings,
     _recent,
-    _resolve_proxies,
+    _resolve_model_id,
     _session,
+    mode_status,
 )
-from .trace_reader import scan_traces
+from .import_wb import import_workbuddy
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -67,8 +72,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = self.path.split("?")[0]
-        if p in ("/stats", "/stats/"):
-            scan_traces()  # 惰性增量扫 trace（内置模型记账），30s 内不重复
+        if p in ("/status", "/status/"):
+            self._send_json(200, mode_status())
+        elif p in ("/scan/progress", "/scan/progress/"):
+            self._send_json(200, trace_cache.progress())
+        elif p in ("/models", "/models/"):
+            self._send_json(200, {"models": route_switch.list_models()})
+        elif p in ("/config/ledger", "/config/ledger/"):
+            self._send_json(200, {
+                "models": ledger.models(),
+                "changelog": ledger.changelog(),
+                "summary": ledger.summary(),
+            })
+        elif p in ("/stats", "/stats/"):
+            trace_cache.maybe_scan()  # 惰性增量扫 trace（读缓存记账），30s 内不重复
             with _lock:
                 by_model = {k: dict(v) for k, v in _agg["by_model"].items()}
                 total = dict(_agg["total"])
@@ -110,8 +127,12 @@ class Handler(BaseHTTPRequestHandler):
         elif p in ("/config", "/config/"):
             with _lock:
                 cfg = json.loads(json.dumps(config._config))
-            cfg["routes"] = dict(ROUTES)
-            cfg["providers"] = _masked_providers(cfg.get("providers"))
+            cfg["channels"] = _masked_channels(cfg.get("channels"))
+            cfg["models"] = _masked_models(cfg.get("models"))
+            log_event(
+                f"[CFG] GET /config: channels={len(cfg.get('channels') or {})} "
+                f"models={len(cfg.get('models') or {})}"
+            )
             self._send_json(200, cfg)
         else:
             self.send_response(404)
@@ -133,17 +154,35 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(new, dict):
             self._send_json(400, {"error": "expect a JSON object"})
             return
+        # 空保护：提交的 channels 与 models 均为空，且当前配置非空时拒绝覆盖，
+        # 防止前端状态丢失/读取失败时把真实配置清空
+        has_channels = isinstance(new.get("channels"), dict) and bool(new["channels"])
+        has_models = isinstance(new.get("models"), dict) and bool(new["models"])
+        incoming_empty = not has_channels and not has_models
+        if incoming_empty and (config._config.get("channels") or config._config.get("models")):
+            self._send_json(400, {
+                "error": "refusing to overwrite non-empty config with empty payload",
+                "hint": "当前配置有内容，而提交的 channels/models 均为空，已拒绝写入",
+            })
+            return
         with _lock:
-            if isinstance(new.get("models"), dict):
-                config._config["models"] = new["models"]
-            if isinstance(new.get("providers"), dict):
-                # 防脱敏回显覆盖真实 key：疑似脱敏值按 id 从现有配置找回
-                config._config["providers"] = _merge_providers_keys(
-                    config._config.get("providers", {}), new["providers"]
+            _dropped = []
+            if isinstance(new.get("channels"), dict):
+                _merged_c, _dropped_c = _merge_channels_keys(
+                    config._config.get("channels", {}), new["channels"]
                 )
-            if isinstance(new.get("routes"), dict):
-                ROUTES.clear()
-                ROUTES.update(new["routes"])
+                config._config["channels"] = _merged_c
+                _dropped += _dropped_c
+            if isinstance(new.get("models"), dict):
+                config._config["models"] = _merge_models_fields(
+                    config._config.get("models", {}), new["models"]
+                )
+        # 注意：log_event 内部会再拿 _lock（非重入锁），必须在锁外调用，否则死锁
+        if _dropped:
+            log_event(
+                "[CFG] PUT /config: dropped masked keys with no real source: "
+                + ", ".join(f"{c}/{kid}" for c, kid in _dropped)
+            )
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(config._config, f, ensure_ascii=False, indent=2)
@@ -151,40 +190,189 @@ class Handler(BaseHTTPRequestHandler):
             log_event(f"[ERR] PUT /config write failed: {e}")
             self._send_json(500, {"error": str(e)})
             return
-        log_event(f"[CFG] PUT /config: models={len(config._config.get('models', {}))} "
-                  f"providers={len(config._config.get('providers', {}))} routes={len(ROUTES)}")
+        log_event(
+            f"[CFG] PUT /config: channels={len(config._config.get('channels', {}))} "
+            f"models={len(config._config.get('models', {}))}"
+        )
+        if config._has_any_key() and config.MODE != "full":
+            config.MODE = "full"
+            log_event("[MODE] -> full (config has keys)")
+        ledger.log("manual_edit", "user PUT /config")
         self._send_json(200, {
             "ok": True,
+            "channels": len(config._config.get("channels", {})),
             "models": len(config._config.get("models", {})),
-            "providers": len(config._config.get("providers", {})),
-            "routes": dict(ROUTES),
         })
 
+    def _read_body(self):
+        """读取并解析 JSON body；失败返回 None。"""
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            return None
+
+    def _handle_scan(self):
+        """POST /scan：触发扫描。body {"force": true} 时清缓存全量重建。"""
+        body = self._read_body() or {}
+        force = bool(body.get("force"))
+        if force:
+            trace_cache.scan_cached_async(force=True)
+            self._send_json(200, {"ok": True, "started": "full rebuild"})
+        else:
+            n = trace_cache.scan_cached_async()
+            self._send_json(200, {"ok": True, "started": "incremental"})
+
+    def _handle_import(self):
+        """POST /import/workbuddy：一键导入 WorkBuddy 自定义模型。"""
+        ok, summary, _ = import_workbuddy()
+        if ok:
+            log_event(f"[IMP] workbuddy import: {summary}")
+        self._send_json(200 if ok else 500, {"ok": ok, **summary})
+
+    def _handle_route(self):
+        """POST /models/{name}/route：body {"route": "proxy"|"direct"}。"""
+        from urllib.parse import unquote
+        name = unquote(self.path.rstrip("/").split("/")[-2])
+        body = self._read_body() or {}
+        route = body.get("route")
+        ok, msg, url = route_switch.switch_route(name, route)
+        log_event(f"[ROUTE] {name} -> {route}: {msg}")
+        self._send_json(200 if ok else 400, {"ok": ok, "message": msg, "url": url})
+
+    def _handle_fetch_models(self):
+        """POST /channels/{name}/fetch_models：用渠道激活 key 请求 {base}/models，
+        拉取该渠道可用模型列表并缓存（成功写回 config.json，供前端添加模型时勾选）。
+
+        注意：上游网络请求在锁外执行，避免持锁等待拖累其他请求。
+        """
+        from urllib.parse import unquote
+        name = unquote(self.path.rstrip("/").split("/")[-2])
+        with _lock:
+            ch = dict(config._channel(name) or {})
+        if not ch:
+            self._send_json(404, {"ok": False, "error": f"channel '{name}' not found"})
+            return
+        base = ch.get("base") or ""
+        if not base:
+            self._send_json(400, {"ok": False, "error": "channel has no base url"})
+            return
+        keys = ch.get("keys") or []
+        if not keys:
+            self._send_json(400, {
+                "ok": False,
+                "error": "channel has no api key",
+                "hint": "请先在渠道配置中添加 API Key，再拉取模型列表",
+            })
+            return
+        ak = ch.get("activeKey")
+        active = next((k.get("key") for k in keys if k.get("id") == ak), None)
+        if not active:
+            active = keys[0].get("key")
+        upstream = base.rstrip("/") + "/models"
+        auth = f"Bearer {active}"
+        proxy_mode = ch.get("proxy") or "auto"
+        try:
+            resp = _session.get(
+                upstream, headers={
+                    "Authorization": auth,
+                    "Accept-Encoding": "identity",
+                },
+                timeout=8, proxies=_proxy_settings(proxy_mode),
+            )
+        except requests.RequestException as e:
+            log_event(f"[ERR] {name} fetch_models RequestException: {e}")
+            self._send_json(502, {
+                "ok": False,
+                "error": "network error",
+                "hint": f"拉取失败：{e}。该渠道可能不支持 /models，请手动填写模型名",
+            })
+            return
+        if resp.status_code >= 400:
+            body_preview = resp.content.decode("utf-8", "replace")[:200]
+            log_event(f"[ERR] {name} fetch_models HTTP {resp.status_code}: {body_preview}")
+            self._send_json(502, {
+                "ok": False,
+                "error": f"upstream HTTP {resp.status_code}",
+                "hint": "该渠道可能不支持 /models 端点，请手动填写模型名",
+            })
+            return
+        try:
+            payload = resp.json()
+            ids = [m.get("id") for m in payload.get("data", []) if m.get("id")]
+        except (ValueError, AttributeError):
+            self._send_json(502, {
+                "ok": False,
+                "error": "unexpected response format",
+                "hint": "该渠道返回格式非 OpenAI 标准，请手动填写模型名",
+            })
+            return
+        cached_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        with _lock:
+            cur_ch = config._config.setdefault("channels", {}).get(name)
+            if cur_ch is not None:
+                cur_ch["availableModels"] = ids
+                cur_ch["fetchedAt"] = cached_at
+                try:
+                    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                        json.dump(config._config, f, ensure_ascii=False, indent=2)
+                except OSError as e:
+                    log_event(f"[ERR] fetch_models write failed: {e}")
+        log_event(f"[MODELS] {name} fetch_models: {len(ids)} models (cached at {cached_at})")
+        self._send_json(200, {
+            "ok": True,
+            "channel": name,
+            "models": ids,
+            "count": len(ids),
+            "cached_at": cached_at,
+        })
+
+    def _handle_mode_start(self):
+        """POST /mode/start：切 full 模式（需已配置真实 key）。"""
+        if not config._has_any_key():
+            self._send_json(400, {
+                "ok": False,
+                "error": "no_api_key",
+                "message": "尚未配置 API Key，请先在设置中添加",
+            })
+            return
+        config.MODE = "full"
+        log_event("[MODE] -> full (forwarding enabled)")
+        self._send_json(200, {"ok": True, **mode_status()})
+
+    def _handle_mode_stop(self):
+        """POST /mode/stop：切回 service 模式（停止转发，不影响扫描/统计）。"""
+        config.MODE = "service"
+        log_event("[MODE] -> service (forwarding disabled)")
+        self._send_json(200, {"ok": True, **mode_status()})
+
     def _handle_keys(self):
-        """POST /keys：管理 provider 的 API key（set|add|del），成功后写回 config.json。"""
+        """POST /keys：管理某个渠道的 API key（set|add|del），成功后写回 config.json。
+        body: {channel, action, keyId?, name?, key?}。有真实 key 时自动切 full 模式。"""
         length = int(self.headers.get("Content-Length", 0))
         try:
             req = json.loads(self.rfile.read(length).decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
             self._send_json(400, {"error": "invalid json body"})
             return
-        provider = req.get("provider")
+        channel = req.get("channel")
         action = req.get("action")
-        if not provider or action not in ("set", "add", "del"):
-            self._send_json(400, {"error": "provider & action(set|add|del) required"})
+        if not channel or action not in ("set", "add", "del"):
+            self._send_json(400, {"error": "channel & action(set|add|del) required"})
             return
         with _lock:
-            prov = (config._config.get("providers") or {}).get(provider)
-            if prov is None:
-                self._send_json(404, {"error": f"provider '{provider}' not found"})
+            cfg_channels = config._config.setdefault("channels", {})
+            ch = cfg_channels.get(channel)
+            if ch is None:
+                self._send_json(404, {"error": f"channel '{channel}' not found in config"})
                 return
-            keys = prov.setdefault("keys", [])
+            keys = ch.setdefault("keys", [])
             key_id = req.get("keyId")
             if action == "set":
                 if not any(k.get("id") == key_id for k in keys):
                     self._send_json(400, {"error": f"keyId '{key_id}' not found"})
                     return
-                prov["activeKey"] = key_id
+                ch["activeKey"] = key_id
             elif action == "add":
                 raw_key = req.get("key", "")
                 if not raw_key:
@@ -196,16 +384,16 @@ class Handler(BaseHTTPRequestHandler):
                     "name": req.get("name") or new_id,
                     "key": raw_key,
                 })
-                if not prov.get("activeKey"):
-                    prov["activeKey"] = new_id
+                if not ch.get("activeKey"):
+                    ch["activeKey"] = new_id
                 key_id = new_id
             elif action == "del":
                 if not any(k.get("id") == key_id for k in keys):
                     self._send_json(400, {"error": f"keyId '{key_id}' not found"})
                     return
                 keys[:] = [k for k in keys if k.get("id") != key_id]
-                if prov.get("activeKey") == key_id:
-                    prov["activeKey"] = keys[0]["id"] if keys else None
+                if ch.get("activeKey") == key_id:
+                    ch["activeKey"] = keys[0]["id"] if keys else None
             try:
                 with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                     json.dump(config._config, f, ensure_ascii=False, indent=2)
@@ -213,14 +401,19 @@ class Handler(BaseHTTPRequestHandler):
                 log_event(f"[ERR] /keys write failed: {e}")
                 self._send_json(500, {"error": str(e)})
                 return
-        log_event(f"[KEY] {provider} {action} key={key_id} active={prov.get('activeKey')} total={len(keys)}")
+        masked = _masked_channels({channel: ch}).get(channel, {}).get("keys", [])
+        log_event(f"[KEY] {channel} {action} key={key_id} active={ch.get('activeKey')} total={len(keys)}")
+        if config._has_any_key() and config.MODE != "full":
+            config.MODE = "full"
+            log_event("[MODE] -> full (first key configured)")
+        ledger.log("keys_change", f"{channel} {action} {key_id}")
         self._send_json(200, {
             "ok": True,
-            "provider": provider,
+            "channel": channel,
             "action": action,
             "keyId": key_id,
-            "activeKey": prov.get("activeKey"),
-            "keys": _masked_providers({provider: prov}).get(provider, {}).get("keys", []),
+            "activeKey": ch.get("activeKey"),
+            "keys": masked,
         })
 
     def do_POST(self):
@@ -228,10 +421,43 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/keys", "/keys/"):
             self._handle_keys()
             return
+        if path in ("/scan", "/scan/"):
+            self._handle_scan()
+            return
+        if path in ("/import/workbuddy", "/import/workbuddy/"):
+            self._handle_import()
+            return
+        if path.startswith("/models/") and path.rstrip("/").endswith("/route"):
+            self._handle_route()
+            return
+        if path.startswith("/channels/") and path.rstrip("/").endswith("/fetch_models"):
+            self._handle_fetch_models()
+            return
+        if path in ("/mode/start", "/mode/start/"):
+            self._handle_mode_start()
+            return
+        if path in ("/mode/stop", "/mode/stop/"):
+            self._handle_mode_stop()
+            return
         if not path.endswith("/chat/completions"):
             self.send_response(404)
             self.end_headers()
             return
+        # 双模式门禁：service 模式下转发停用（扫描/统计/配置接口不受影响）
+        if config.MODE != "full":
+            msg = json.dumps({
+                "error": {
+                    "type": "proxy_not_enabled",
+                    "message": "代理未启用：请在设置中配置 API Key 并启动代理",
+                }
+            }).encode("utf-8")
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(msg)))
+            self.end_headers()
+            self.wfile.write(msg)
+            return
+        config._forwarded += 1
 
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length)
@@ -245,26 +471,31 @@ class Handler(BaseHTTPRequestHandler):
         model = body.get("model", "unknown")
         stream = bool(body.get("stream", False))
 
-        # 路由：模型名优先（config.models[model].provider），未登记回退 path 前缀
-        provider_name = ((config._config.get("models") or {}).get(model) or {}).get("provider")
-        if not provider_name:
-            route_key = DEFAULT_ROUTE
-            for k in dict(ROUTES):
-                if self.path.endswith(k):
-                    route_key = k
-                    break
-            provider_name = ROUTES[route_key]
-        prov = _provider(provider_name)
-        if prov is None:
-            msg = json.dumps({"error": f"provider '{provider_name}' (model {model}) not configured"}).encode("utf-8")
+        # 若请求用 name（显示名）命中配置，转发时把 body.model 重写为真实 id，
+        # 避免上游只认 id 而 404
+        real_id = _resolve_model_id(model)
+        if real_id != model:
+            log_event(f"[ALIAS] {model} -> {real_id} (display name to model id)")
+            body["model"] = real_id
+            model = real_id
+
+        # 路由：模型名查 config.models 行，base 即上游地址（无第二跳）
+        base = _model_base(model)
+        if not base:
+            msg = json.dumps({
+                "error": {
+                    "type": "model_not_configured",
+                    "message": f"模型 '{model}' 未配置：请在设置 → 模型 中添加 base 地址后重试",
+                }
+            }).encode("utf-8")
             self.send_response(404)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(msg)))
             self.end_headers()
             self.wfile.write(msg)
             return
-        upstream = prov[0] + "/chat/completions"
-        label = prov[1]
+        upstream = base.rstrip("/") + "/chat/completions"
+        label = _model_label(model)
 
         log_event(f"[REQ] {label}/{model} stream={stream} prompt_chars={len(raw)}")
         if stream and "stream_options" not in body:
@@ -272,11 +503,12 @@ class Handler(BaseHTTPRequestHandler):
         for k, v in _model_defaults(model).items():
             body.setdefault(k, v)
 
-        # 渠道级 key 覆盖：配置了 keys 时用激活 key 覆盖客户端 Authorization
-        active = _active_key(provider_name)
+        # 模型级 key 覆盖：该模型配置了 keys 时用激活 key 覆盖客户端 Authorization；
+        # 未配置则透传客户端自己带的 key（如 WorkBuddy 直连自定义模型）
+        active = _model_key(model)
         auth = f"Bearer {active}" if active else self.headers.get("Authorization", "")
         if active:
-            log_event(f"[KEY] {provider_name} using active key {_mask_key(active)}")
+            log_event(f"[KEY] {label}/{model} using model key {_mask_key(active)}")
         # Accept-Encoding: identity 强制未压缩流，否则 stream 模式转发乱码
         headers = {
             "Content-Type": "application/json",
@@ -290,7 +522,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 resp = _session.post(
                     upstream, json=body, headers=headers,
-                    stream=stream, timeout=300, proxies=_resolve_proxies(provider_name),
+                    stream=stream, timeout=300, proxies=_proxy_settings(_model_proxy(model)),
                 )
             except requests.RequestException as e:
                 log_event(f"[ERR] {label}/{model} attempt{attempt} RequestException: {e}")

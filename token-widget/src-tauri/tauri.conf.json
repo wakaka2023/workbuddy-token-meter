@@ -14,9 +14,9 @@
       {
         "label": "main",
         "title": "Token Widget",
-        "width": 250,
-        "height": 130,
-        "minWidth": 235,
+        "width": 240,
+        "height": 132,
+        "minWidth": 200,
         "minHeight": 110,
         "resizable": true,
         "decorations": false,

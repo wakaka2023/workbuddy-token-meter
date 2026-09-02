@@ -1,5 +1,5 @@
 import type { CacheScope } from "../types";
-import { fmt, fmtTime } from "../utils";
+import { fmt } from "../utils";
 
 interface Props {
   online: boolean | null;
@@ -16,6 +16,8 @@ function MiniView({ online, lastRec, cacheScope, todayCacheRate, modelTodayCache
     cacheScope === "model"
       ? `该模型今日缓存命中率（${lastRec?.model ?? ""}）`
       : "全部模型今日缓存命中率";
+  const rateNum = parseFloat(rate) || 0;
+  const rateTier = rateNum >= 70 ? "high" : rateNum >= 40 ? "mid" : "low";
 
   return (
     <div className="mini-body">
@@ -33,27 +35,28 @@ function MiniView({ online, lastRec, cacheScope, todayCacheRate, modelTodayCache
             ) : (
               <span className="mini-prov">{String(lastRec.label ?? "")}</span>
             )}
-            <span className="mini-time mono" title="上次请求时间">
-              {fmtTime(lastRec.ts)}
-            </span>
           </div>
           {failed ? (
             <div className="mini-err-line" title={String(lastRec.error ?? "")}>
               请求失败
             </div>
           ) : (
-            <div className="mini-rec-tokens">
-              <span className="mini-token mini-in" title="输入">
-                ↑{fmt(Number(lastRec.prompt_tokens ?? 0))}
+            <div className="mini-grid">
+              <span className="mini-cell mini-in" title="输入">
+                <i className="mini-sym">↑</i>
+                <b className="mini-val">{fmt(Number(lastRec.prompt_tokens ?? 0))}</b>
               </span>
-              <span className="mini-token mini-out" title="输出">
-                ↓{fmt(Number(lastRec.completion_tokens ?? 0))}
+              <span className="mini-cell mini-out" title="输出">
+                <i className="mini-sym">↓</i>
+                <b className="mini-val">{fmt(Number(lastRec.completion_tokens ?? 0))}</b>
               </span>
-              <span className="mini-token mini-cache-tok" title="缓存命中">
-                ◎{fmt(Number(lastRec.cache_read_tokens ?? 0))}
+              <span className="mini-cell mini-cache-tok" title="缓存命中">
+                <i className="mini-sym">◎</i>
+                <b className="mini-val">{fmt(Number(lastRec.cache_read_tokens ?? 0))}</b>
               </span>
-              <span className="mini-cache" title={rateTip}>
-                {rate}%
+              <span className={`mini-cell mini-rate-cell mini-rate-${rateTier}`} title={rateTip}>
+                <i className="mini-sym mini-rate-dot" />
+                <b className="mini-val">{rate}%</b>
               </span>
             </div>
           )}

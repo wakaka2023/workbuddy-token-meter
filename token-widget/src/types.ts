@@ -25,48 +25,111 @@ export interface Stats {
   records: Array<Record<string, unknown>>;
 }
 
-export interface ProviderCfg {
-  base: string;
-  label: string;
-  proxy?: string; // 网络通道：auto(默认)/direct/env/http(s)://显式地址
-  keys?: Array<{ id: string; name: string; key: string }>;
+export interface KeyCfg {
+  id: string;
+  name: string;
+  key: string;
+}
+
+export interface ChannelCfg {
+  label?: string;
+  base?: string;
+  proxy?: string; // 网络通道：auto(默认)/direct/http(s)://显式地址
+  keys?: KeyCfg[];
   activeKey?: string;
+  availableModels?: string[]; // fetch_models 拉取的可用模型列表
+  fetchedAt?: string; // 拉取时间
+}
+
+export interface ModelCfg {
+  name?: string; // WorkBuddy 侧显示名（展示用）
+  channel?: string; // 所属渠道名
+  key?: string; // 指定该渠道 key 池中的 key id；未指定跟随渠道 activeKey
+  price?: { input: number; output: number; cache_read: number };
+  defaults?: Record<string, unknown>;
 }
 
 export interface ProxyConfig {
   _comment?: string;
-  models: Record<
-    string,
-    {
-      provider: string;
-      price: { input: number; output: number; cache_read: number };
-      defaults?: Record<string, unknown>;
-    }
-  >;
-  providers: Record<string, ProviderCfg>;
-  routes: Record<string, string>;
+  channels: Record<string, ChannelCfg>;
+  models: Record<string, ModelCfg>;
+}
+
+export interface ChannelRow {
+  id: string;
+  label: string;
+  base: string;
+  proxyMode: "auto" | "direct" | "custom"; // UI 选择
+  proxyUrl: string; // custom 模式下的代理地址（端口）
+  keys: KeyCfg[];
+  activeKey: string;
+  availableModels: string[];
+  fetchedAt: string;
 }
 
 export interface ModelRow {
-  id: string;
-  provider: string;
+  id: string; // 模型 id：渠道上游真实模型名（请求体 model），必须对应渠道
+  name: string; // 显示名（WorkBuddy 里展示的名字）
+  channel: string; // 所属渠道
+  key: string; // 该渠道 key 池中的 key id
   input: string;
   output: string;
   cacheRead: string;
 }
 
-export interface ProviderRow {
-  name: string;
-  base: string;
-  label: string;
-  proxy: string; // 持久化值：auto/direct/http(s)://...
-  proxyMode: "auto" | "direct" | "custom"; // UI 选择
-  proxyUrl: string; // custom 模式下的代理地址
-  keys: Array<{ id: string; name: string; key: string }>;
-  activeKey: string;
-}
-
 export type Mode = "mini" | "expanded";
 export type Theme = "dark" | "light";
 export type CacheScope = "today" | "model";
-export type SettingsTab = "appearance" | "models" | "providers" | "keys";
+export type SettingsTab = "appearance" | "channels" | "models" | "scan" | "config";
+
+export interface ProxyStatus {
+  mode: "service" | "full";
+  port: number;
+  forwarded: number;
+  uptime: number;
+  has_key: boolean;
+}
+
+export interface RouteModel {
+  id: string;
+  name: string;
+  url: string;
+  route: "proxy" | "direct";
+  has_key: boolean;
+  origin_url?: string;
+}
+
+export interface LedgerModel {
+  name: string;
+  channel: string | null;
+  origin_url: string | null;
+  current_url: string;
+  route: "proxy" | "direct";
+  key_ref: string | null;
+  updated_at?: string;
+}
+
+export interface LedgerLog {
+  ts: string;
+  op: string;
+  detail: string;
+}
+
+export interface LedgerSummary {
+  models: number;
+  logs: number;
+}
+
+export interface LedgerData {
+  models: LedgerModel[];
+  changelog: LedgerLog[];
+  summary: LedgerSummary;
+}
+
+export interface ScanProgress {
+  running: boolean;
+  total: number;
+  scanned: number;
+  records: number;
+  done: boolean;
+}

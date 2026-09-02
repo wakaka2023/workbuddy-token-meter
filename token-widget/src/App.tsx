@@ -2,10 +2,14 @@ import { useEffect, useState } from "react";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import type {
   CacheScope,
+  ChannelCfg,
+  ChannelRow,
+  LedgerData,
+  ModelCfg,
   ModelRow,
   Mode,
-  ProviderRow,
-  ProxyConfig,
+  ProxyStatus,
+  RouteModel,
   SettingsTab,
   Stats,
   Theme,
@@ -26,8 +30,23 @@ import {
   THEME_KEY,
   acrylicAlpha,
 } from "./constants";
-import { loadLS, saveLS } from "./utils";
-import { fetchConfig, fetchStats, postKey, putConfig } from "./api";
+import { fmtTime, loadLS, saveLS } from "./utils";
+import {
+  fetchChannelModels,
+  fetchConfig,
+  fetchLedger,
+  fetchRouteModels,
+  fetchScanProgress,
+  fetchStats,
+  fetchStatus,
+  importWorkbuddy,
+  modeStart,
+  modeStop,
+  switchRoute,
+  triggerScan,
+  postKey,
+  putConfig,
+} from "./api";
 import { Icon } from "./components/Icon";
 import MiniView from "./components/MiniView";
 import ExpandedView from "./components/ExpandedView";
@@ -52,16 +71,40 @@ function App() {
     loadLS(CACHE_SCOPE_KEY, "today", (v) => (v === "model" ? "model" : "today")),
   );
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("appearance");
+  const [channels, setChannels] = useState<ChannelRow[]>([]);
   const [models, setModels] = useState<ModelRow[]>([]);
-  const [providers, setProviders] = useState<ProviderRow[]>([]);
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
   const [newKey, setNewKey] = useState<Record<string, { name: string; key: string }>>({});
+  // v0.2 新增：代理状态 / 模型路由 / 台账
+  const [status, setStatus] = useState<ProxyStatus | null>(null);
+  const [routeModels, setRouteModels] = useState<RouteModel[]>([]);
+  const [ledger, setLedger] = useState<LedgerData | null>(null);
+  const [scanProgress, setScanProgress] = useState<{ running: boolean; total: number; scanned: number; records: number; done: boolean } | null>(null);
+  const [opMsg, setOpMsg] = useState("");
+
+  // 扫描进度轮询：running 期间每 1s 拉一次 /scan/progress
+  useEffect(() => {
+    if (!scanProgress?.running) return;
+    const t = setInterval(async () => {
+      try {
+        setScanProgress(await fetchScanProgress());
+      } catch {
+        /* 忽略 */
+      }
+    }, 1000);
+    return () => clearInterval(t);
+  }, [scanProgress?.running]);
 
   const refresh = async () => {
     try {
       setStats(await fetchStats());
       setOnline(true);
+      try {
+        setStatus(await fetchStatus());
+      } catch {
+        /* status 可选 */
+      }
     } catch {
       setOnline(false);
     }
@@ -93,79 +136,196 @@ function App() {
 
   const toggleMode = async () => {
     const next = mode === "mini" ? "expanded" : "mini";
-    const sz = next === "mini" ? MINI_SIZE : EXPD_SIZE;
-    await getCurrentWindow().setSize(new LogicalSize(sz.w, sz.h));
-    setMode(next);
-    if (next === "mini") setShowSettings(false);
+    if (next === "mini") {
+      setMode(next);
+      setShowSettings(false);
+      // 固定一个稍小的 mini 尺寸；用户之后可自行拖拽微调，不强制覆盖
+      await getCurrentWindow().setSize(new LogicalSize(MINI_SIZE.w, MINI_SIZE.h));
+    } else {
+      await getCurrentWindow().setSize(new LogicalSize(EXPD_SIZE.w, EXPD_SIZE.h));
+      setMode(next);
+    }
   };
 
   const handleKeyOp = async (body: Record<string, string>) => {
     setSaveMsg("");
     try {
       const res = await postKey(body);
-      setProviders(
-        providers.map((p) =>
-          p.name === body.provider
-            ? { ...p, keys: res.keys, activeKey: res.activeKey }
-            : p,
+      const cid = body.channel;
+      setChannels(
+        channels.map((c) =>
+          c.id === cid ? { ...c, keys: res.keys, activeKey: res.activeKey ?? "" } : c,
         ),
       );
-      setSaveMsg(`已切换 ${body.provider} → ${res.activeKey}`);
+      setSaveMsg(`已保存渠道 ${cid} 的 key 配置`);
     } catch (e) {
       setSaveMsg(`操作失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  // 拉取渠道可用模型列表（b.ai 等支持 /models 的上游）；失败提示但保留手填入口
+  const handleFetchModels = async (cid: string) => {
+    setSaveMsg("");
+    try {
+      const res = await fetchChannelModels(cid);
+      if (!res.ok) {
+        setSaveMsg(res.hint ?? res.error ?? `拉取模型失败（渠道 ${cid}）`);
+        return;
+      }
+      setChannels(
+        channels.map((c) =>
+          c.id === cid ? { ...c, availableModels: res.models, fetchedAt: res.cached_at } : c,
+        ),
+      );
+      setSaveMsg(`渠道 ${cid} 拉取到 ${res.count} 个模型`);
+    } catch (e) {
+      setSaveMsg(`拉取失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handleModeStart = async () => {
+    try {
+      const s = await modeStart();
+      setStatus(s);
+      setOpMsg("代理已启动（full 模式）");
+    } catch (e) {
+      setOpMsg(`启动失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handleModeStop = async () => {
+    try {
+      const s = await modeStop();
+      setStatus(s);
+      setOpMsg("代理已停止（service 模式）");
+    } catch (e) {
+      setOpMsg(`停止失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handleImport = async () => {
+    setOpMsg("导入中…");
+    try {
+      const res = await importWorkbuddy();
+      setOpMsg(`导入完成：${res.imported ?? 0} 个直连模型，${res.skipped ?? 0} 个跳过`);
+      await loadSettings();
+    } catch (e) {
+      setOpMsg(`导入失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handleRouteSwitch = async (name: string, route: "proxy" | "direct") => {
+    try {
+      const res = await switchRoute(name, route);
+      setOpMsg(res.message);
+      await loadSettings();
+    } catch (e) {
+      setOpMsg(`切换失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handleScan = async (force: boolean) => {
+    try {
+      await triggerScan(force);
+      setScanProgress({ running: true, total: 0, scanned: 0, records: 0, done: false });
+      setOpMsg(force ? "已开始全量重建" : "已开始增量扫描");
+    } catch (e) {
+      setOpMsg(`扫描触发失败：${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
   const openSettings = async () => {
     if (mode === "mini") await toggleMode();
     setShowSettings(true);
+    await loadSettings();
+  };
+
+  // 拉取配置到编辑 state（打开面板 / 手动刷新 / 导入路由操作后调用）
+  const loadSettings = async () => {
     setSaveMsg("");
     try {
       const cfg = await fetchConfig();
-      setModels(
-        Object.entries(cfg.models).map(([id, m]) => ({
-          id,
-          provider: m.provider,
-          input: String(m.price.input ?? 0),
-          output: String(m.price.output ?? 0),
-          cacheRead: String(m.price.cache_read ?? 0),
-        })),
-      );
-      setProviders(
-        Object.entries(cfg.providers).map(([name, p]) => {
-          const raw = p.proxy ?? "auto";
+      setChannels(
+        Object.entries(cfg.channels ?? {}).map(([id, ch]) => {
+          const raw = ch.proxy ?? "auto";
           const isUrl = /^https?:\/\//i.test(raw);
-          // 配置里存的是完整地址，UI 只展示端口号
           const portMatch = isUrl ? raw.match(/:(\d+)/) : null;
           return {
-            name,
-            base: p.base,
-            label: p.label,
-            proxy: raw,
-            proxyMode: (isUrl ? "custom" : raw) as ProviderRow["proxyMode"],
+            id,
+            label: ch.label ?? id,
+            base: ch.base ?? "",
+            proxyMode: (isUrl ? "custom" : raw) as ChannelRow["proxyMode"],
             proxyUrl: portMatch ? portMatch[1] : "",
-            keys: p.keys ?? [],
-            activeKey: p.activeKey ?? "",
+            keys: ch.keys ?? [],
+            activeKey: ch.activeKey ?? "",
+            availableModels: ch.availableModels ?? [],
+            fetchedAt: ch.fetchedAt ?? "",
           };
         }),
       );
-    } catch {
-      setSaveMsg("读取配置失败，代理未运行？");
+      setModels(
+        Object.entries(cfg.models ?? {}).map(([id, m]) => {
+          const p = m.price;
+          return {
+            id,
+            name: (m as any).name ?? (m as any).label ?? "", // 兼容后端 label→name 过渡
+            channel: m.channel ?? "",
+            key: m.key ?? "",
+            input: String(p?.input ?? 0),
+            output: String(p?.output ?? 0),
+            cacheRead: String(p?.cache_read ?? 0),
+          };
+        }),
+      );
+      setRouteModels(await fetchRouteModels());
+      setLedger(await fetchLedger());
+      setStatus(await fetchStatus());
+      setSaveMsg("");
+    } catch (e) {
+      setSaveMsg(`读取配置失败：${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
   const save = async () => {
-    if (models.some((m) => !m.id.trim()) || providers.some((p) => !p.name.trim())) {
-      setSaveMsg("模型 id 与 provider 名称不能为空");
+    if (models.some((m) => !m.id.trim())) {
+      setSaveMsg("模型名不能为空");
+      return;
+    }
+    if (channels.some((c) => !c.id.trim())) {
+      setSaveMsg("渠道名不能为空");
+      return;
+    }
+    // 空保护：没有任何渠道/模型时拒绝保存，防止空配置覆盖真实配置
+    if (channels.length === 0 && models.length === 0) {
+      setSaveMsg("配置为空，未执行保存（避免覆盖已有配置）");
       return;
     }
     setSaving(true);
     setSaveMsg("");
     try {
-      const modelsObj: ProxyConfig["models"] = {};
+      const channelsObj: Record<string, ChannelCfg> = {};
+      for (const c of channels) {
+        channelsObj[c.id.trim()] = {
+          label: c.label.trim() || c.id.trim(),
+          base: c.base.trim(),
+          proxy:
+            c.proxyMode === "custom"
+              ? c.proxyUrl.trim()
+                ? `http://127.0.0.1:${c.proxyUrl.trim()}`
+                : "auto"
+              : c.proxyMode,
+          keys: c.keys,
+          activeKey: c.activeKey || undefined,
+          availableModels: c.availableModels.length ? c.availableModels : undefined,
+          fetchedAt: c.fetchedAt || undefined,
+        };
+      }
+      const modelsObj: Record<string, ModelCfg> = {};
       for (const m of models) {
         modelsObj[m.id.trim()] = {
-          provider: m.provider,
+          name: m.name.trim() || m.id.trim(),
+          channel: m.channel.trim(),
+          key: m.key.trim() || undefined,
           price: {
             input: Number(m.input) || 0,
             output: Number(m.output) || 0,
@@ -173,23 +333,8 @@ function App() {
           },
         };
       }
-      const providersObj: ProxyConfig["providers"] = {};
-      for (const p of providers) {
-        providersObj[p.name.trim()] = {
-          base: p.base.trim(),
-          label: p.label.trim() || p.name.trim(),
-          proxy:
-            p.proxyMode === "custom"
-              ? p.proxyUrl.trim()
-                ? `http://127.0.0.1:${p.proxyUrl.trim()}`
-                : "auto"
-              : p.proxyMode,
-          keys: p.keys,
-          activeKey: p.activeKey || undefined,
-        };
-      }
-      const res = await putConfig({ models: modelsObj, providers: providersObj });
-      setSaveMsg(`已保存并热加载（模型 ${res.models} / 渠道 ${res.providers}）`);
+      const res = await putConfig({ channels: channelsObj, models: modelsObj });
+      setSaveMsg(`已保存并热加载（渠道 ${res.channels} · 模型 ${res.models}）`);
       refresh();
       setTimeout(() => setShowSettings(false), 900);
     } catch (e) {
@@ -216,7 +361,6 @@ function App() {
     return ((m.cache_read_tokens / m.prompt_tokens) * 100).toFixed(1);
   })();
 
-  const providerNames = providers.map((p) => p.name);
   const miniFailed = mode === "mini" && lastRec ? lastRec.ok === false : false;
 
   return (
@@ -225,6 +369,11 @@ function App() {
         <span className="title" data-tauri-drag-region>
           {mode === "mini" ? "Token" : "Token Widget"}
         </span>
+        {mode === "mini" && lastRec && (
+          <span className="title-time mono" data-tauri-drag-region>
+            {fmtTime(lastRec.ts)}
+          </span>
+        )}
         <div className="title-actions">
           <button
             className="icon-btn"
@@ -266,11 +415,10 @@ function App() {
             setCacheScope={setCacheScope}
             settingsTab={settingsTab}
             setSettingsTab={setSettingsTab}
+            channels={channels}
+            setChannels={setChannels}
             models={models}
             setModels={setModels}
-            providers={providers}
-            setProviders={setProviders}
-            providerNames={providerNames}
             newKey={newKey}
             setNewKey={setNewKey}
             saveMsg={saveMsg}
@@ -279,6 +427,18 @@ function App() {
             onSave={save}
             onClose={() => setShowSettings(false)}
             onKeyOp={handleKeyOp}
+            onFetchModels={handleFetchModels}
+            status={status}
+            routeModels={routeModels}
+            ledger={ledger}
+            scanProgress={scanProgress}
+            opMsg={opMsg}
+            onModeStart={handleModeStart}
+            onModeStop={handleModeStop}
+            onImport={handleImport}
+            onRouteSwitch={handleRouteSwitch}
+            onScan={handleScan}
+            onRefresh={loadSettings}
           />
         ) : (
           <ExpandedView stats={stats} />
@@ -291,9 +451,12 @@ function App() {
           {online === null
             ? "连接中…"
             : online
-              ? "代理正常"
+              ? `代理正常 · ${status?.mode === "full" ? "转发中" : "待配置"}`
               : `无法连接 ${PROXY}`}
-          <span className="status-right">{POLL_MS / 1000}s</span>
+          <span className="status-right">
+            {status ? `mode:${status.mode} · 转发:${status.forwarded}` : ""}
+            {POLL_MS / 1000}s
+          </span>
         </footer>
       )}
     </div>

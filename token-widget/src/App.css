@@ -145,6 +145,18 @@ body {
     inset 0 -1px 0 rgba(255, 255, 255, 0.03);
 }
 
+/* mini 模式：标题栏固定高度 */
+.mode-mini .titlebar {
+  height: 20px;
+}
+
+.mode-mini .body-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 /* 失败态：整窗红描边 + 红色光晕 */
 .widget.mini-failed {
   border-color: rgba(229, 72, 77, 0.75);
@@ -249,7 +261,7 @@ body {
   width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 7px;
 }
 
 .mini-rec-top {
@@ -258,9 +270,8 @@ body {
   gap: 8px;
   min-width: 0;
 }
-
 .mini-model {
-  font-size: 15px;
+  font-size: 12.5px;
   font-weight: 700;
   color: var(--text-bright);
   overflow: hidden;
@@ -282,24 +293,40 @@ body {
   border: 1px solid var(--prov-border);
 }
 
-.mini-time {
-  font-size: 10px;
-  color: var(--text-dim);
-  flex-shrink: 0;
-  font-variant-numeric: tabular-nums;
+.mini-grid {
+  display: grid;
+  grid-template-columns: auto auto;
+  justify-content: start;
+  column-gap: 22px;
+  row-gap: 7px;
 }
 
-.mini-rec-tokens {
+.mini-cell {
   display: flex;
   align-items: baseline;
-  gap: 13px;
+  gap: 5px;
+  min-width: 0;
+  line-height: 1;
 }
 
-.mini-token {
-  font-size: 17px;
-  font-weight: 700;
+.mini-sym {
+  font-style: normal;
+  font-weight: 800;
+  font-size: 15px;
+  flex-shrink: 0;
+  width: 1em;
+  text-align: center;
+}
+
+.mini-val {
   font-family: Consolas, "Courier New", monospace;
+  font-weight: 800;
+  font-size: 18px;
   font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 .mini-in {
@@ -314,19 +341,42 @@ body {
   color: var(--mini-cache);
 }
 
-.mini-cache {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--amber);
-  margin-left: auto;
-  font-variant-numeric: tabular-nums;
+.mini-rate-cell {
+  color: inherit;
+  align-items: baseline;
 }
 
-/* 行3 已移除，保留类名占位避免误用 */
-.mini-sub,
-.mini-sub-rate,
-.mini-sub-time {
-  display: none;
+.mini-rate-dot {
+  width: 1em;
+  height: 1em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  text-align: center;
+  color: currentColor;
+  align-self: center;
+}
+
+.mini-rate-dot::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
+}
+
+.mini-rate-high {
+  color: var(--green);
+}
+
+.mini-rate-mid {
+  color: var(--amber);
+}
+
+.mini-rate-low {
+  color: var(--red);
 }
 
 .mini-fail-badge {
@@ -358,7 +408,6 @@ body {
 .titlebar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   height: 26px;
   flex-shrink: 0;
 }
@@ -368,6 +417,13 @@ body {
   font-size: 13px;
   letter-spacing: 0.3px;
   color: var(--text-strong);
+}
+
+.title-time {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  margin-left: 8px;
 }
 
 .icon-btn,
@@ -404,6 +460,7 @@ body {
 .title-actions {
   display: flex;
   gap: 4px;
+  margin-left: auto;
 }
 
 /* ---- 设置面板 ---- */
@@ -565,6 +622,71 @@ body {
   min-width: 60px;
 }
 
+/* 模型 id 字段（input + 下拉箭头） */
+.mdl-field {
+  display: flex;
+  flex: 2;
+  min-width: 60px;
+  position: relative;
+}
+.mdl-field .s-input.s-id {
+  border-radius: 6px 0 0 6px;
+  flex: 1;
+  min-width: 0;
+}
+.mdl-arrow {
+  width: 22px;
+  flex-shrink: 0;
+  background: var(--input-bg);
+  border: 1px solid var(--card-border);
+  border-left: none;
+  border-radius: 0 6px 6px 0;
+  color: var(--text-sub);
+  font-size: 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  padding: 0;
+}
+.mdl-arrow:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 渠道卡片头部（渠道名+显示名+操作按钮） */
+.ch-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: space-between;
+}
+.ch-title {
+  display: flex;
+  gap: 5px;
+  flex: 1;
+  min-width: 0;
+}
+/* 渠道头内：渠道名短、显示名长 */
+.ch-title .s-input.s-id {
+  flex: 1;
+  min-width: 70px;
+}
+.ch-title .s-input.s-lab {
+  flex: 1.6;
+  min-width: 80px;
+}
+.ch-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+  align-items: center;
+}
+.ch-actions .add-btn {
+  white-space: nowrap;
+}
+
 .s-input.s-prov {
   flex: 1;
   min-width: 50px;
@@ -585,7 +707,8 @@ body {
   min-width: 50px;
 }
 
-.prov-block {
+.prov-block,
+.model-block {
   display: flex;
   flex-direction: column;
   gap: 5px;
@@ -593,6 +716,135 @@ body {
   border: 1px solid var(--card-border);
   border-radius: 8px;
   padding: 6px;
+}
+
+/* 模型行的块略紧凑（渠道卡片同构，padding 略小区分层级） */
+.model-block.model-row-slim {
+  padding: 5px 6px;
+}
+
+.price-row {
+  align-items: center;
+}
+
+.price-hint {
+  font-size: 10px;
+  color: var(--text-sub);
+  flex: 2;
+  min-width: 80px;
+}
+
+.fetch-row {
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+/* 渠道卡片内 key 池空态提示 */
+.key-empty-hint {
+  font-size: 10px;
+  color: var(--text-sub);
+  padding: 1px 0;
+}
+
+/* key 池折叠「添加 key」入口 */
+.key-add-toggle {
+  align-self: flex-start;
+  white-space: nowrap;
+}
+
+/* key 添加表单里的取消按钮 */
+.key-cancel-btn {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+/* 拉取/重新拉取按钮不换行 */
+.fetch-btn {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ---- 模型 id 候选浮层（fixed，不被滚动容器裁剪） ---- */
+.dd-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 5000;
+  background: transparent;
+}
+
+.dd-panel {
+  position: fixed;
+  z-index: 5001;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  max-height: 320px;
+}
+
+.dd-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--card-border);
+}
+
+.dd-tip {
+  font-size: 10px;
+  color: var(--text-sub);
+  white-space: nowrap;
+}
+
+.dd-filter {
+  margin: 5px 8px 0;
+}
+
+.dd-list {
+  overflow-y: auto;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 200px;
+}
+
+.dd-item {
+  background: transparent;
+  border: none;
+  text-align: left;
+  color: var(--text-main);
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-family: ui-monospace, Consolas, monospace;
+  word-break: break-all;
+}
+
+.dd-item:hover {
+  background: var(--hover-bg);
+  color: var(--accent);
+}
+
+.dd-item.sel {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.dd-empty {
+  font-size: 11px;
+  color: var(--text-sub);
+  padding: 10px 8px;
+  line-height: 1.5;
 }
 
 .s-input.s-proxy-sel {
@@ -1075,4 +1327,74 @@ select.s-input option {
 .mono {
   font-family: Consolas, "Courier New", monospace;
   font-variant-numeric: tabular-nums;
+}
+
+/* ===== v0.2 新元素 ===== */
+.settings-desc {
+  font-size: 11px;
+  color: var(--text-dim, #8a90a6);
+  line-height: 1.5;
+  margin: 2px 0 8px;
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--text-dim, #8a90a6);
+  flex: 1;
+}
+
+.scan-actions {
+  gap: 8px;
+}
+
+.scan-progress {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--accent, #4f8cff);
+}
+
+.route-row {
+  gap: 8px;
+  padding: 6px 0;
+}
+
+.route-name {
+  flex: 1;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.route-tag {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+.route-tag.proxy {
+  background: rgba(79, 140, 255, 0.15);
+  color: #4f8cff;
+}
+.route-tag.direct {
+  background: rgba(46, 194, 126, 0.15);
+  color: #2ec27e;
+}
+.route-tag.full {
+  background: rgba(46, 194, 126, 0.15);
+  color: #2ec27e;
+}
+.route-tag.service {
+  background: rgba(255, 170, 60, 0.15);
+  color: #ffaa3c;
+}
+
+.ledger-row {
+  gap: 8px;
+  padding: 5px 0;
+}
+
+.add-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
