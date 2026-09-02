@@ -129,3 +129,12 @@ export async function fetchChannelModels(
   const res = await r.json();
   return res;
 }
+
+export async function setPollInterval(ms: number): Promise<{ ok: boolean; interval_ms: number; scan_ttl: number }> {
+  const r = await fetch(`${PROXY}/config/poll`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ interval_ms: ms }),
+  });
+  return r.json();
+}

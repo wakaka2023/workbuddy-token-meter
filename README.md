@@ -1,150 +1,148 @@
 # workbuddy-token-meter
 
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-0.2.3-blue.svg)]()
 [![Platform](https://img.shields.io/badge/platform-Windows-0078d6.svg)]()
 [![Python](https://img.shields.io/badge/python-3.10+-3776AB.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-green.svg)]()
 
-A lightweight **desktop floating widget + local proxy** that tracks token usage of
-[WorkBuddy](https://www.workbuddy.cn) LLM requests in real time. See at a glance how
-many tokens each conversation costs — per model, per day, or per provider — without
-touching WorkBuddy internals.
+**中文** | [English](./README.en.md)
 
-**[简体中文](./README.zh-CN.md)** · English
+一个轻量的 **桌面悬浮窗 + 本地代理** 组合，实时统计 [WorkBuddy](https://www.workbuddy.cn)
+每次 LLM 请求的 token 用量。不侵入 WorkBuddy 内部，一眼看清每个对话花了多少 token——
+按模型、按天、按 provider 维度聚合展示。
 
 ---
 
-## Features
+## 功能特性
 
-- 🖥️ **Desktop floating widget** — frameless, transparent, always-on-top mini window
-  with live stats: total calls, tokens, cost, per-model breakdown and a daily trend chart.
-- 🔀 **Dual-channel accounting** — requests routed through the local proxy are metered
-  from upstream `usage` responses (`usage.jsonl`); built-in models and *directly-connected*
-  custom models are metered by a passive reader over WorkBuddy's local trace files.
-  No hooks, no injection, zero impact on response latency.
-- 🏷️ **Provider-aware labels** — custom models are tagged with their real provider name
-  (e.g. `B.AI`, resolved from `models.json`), built-in models are tagged `built-in`.
-- 📊 **Rich aggregation** — totals, per-model, per-day, per-model-per-day and the latest
-  `N` records, served through a single `/stats` endpoint.
-- 🔌 **OpenAI-compatible local proxy** — transparent forwarding with sync + SSE streaming,
-  multi-provider routing (`b.ai` / `aliyun`), multi-key rotation, automatic retry with
-  backoff on retryable errors, and per-provider proxy resolution (auto-probe local VPN).
-- 🔐 **Safe by default** — API keys are masked in every response and never written to
-  logs; the repository only ships a sanitized `config.example.json`.
+- 🖥️ **桌面悬浮窗** — 无边框、透明、置顶的迷你窗口，实时展示总调用次数、token 数、费用、
+  按模型明细与按天趋势图。
+- 🔀 **双通道记账** — 走本地代理的请求从上游 `usage` 响应记账（`usage.jsonl`）；
+  **内置模型**与**直连上游的自定义模型**通过旁路读取 WorkBuddy 本地 trace 文件记账。
+  无 Hook、无注入、对响应速度零影响。
+- 🏷️ **Provider 感知标签** — 自定义模型按真实 provider 名标记（如 `B.AI`，从
+  `models.json` 解析），内置模型标记为 `内置`。
+- 📊 **多维聚合** — 总量、按模型、按天、按模型×天、最近 N 条记录，统一由 `/stats`
+  接口输出。
+- 🔌 **OpenAI 兼容本地代理** — 透明转发（同步 + SSE 流式），多 provider 路由
+  （`b.ai` / `aliyun`），多 key 轮换，可重试错误自动退避重试，渠道级代理策略
+  （自动探测本机 VPN）。
+- 🔐 **默认安全** — API key 在一切响应中脱敏、绝不写入日志；仓库仅保留脱敏后的
+  `config.example.json`。
 
-## Architecture
+## 架构
 
 ```
 ┌─────────────────────┐   POST /v1/chat/completions   ┌─────────────────────────────┐
 │      WorkBuddy      │ ───────────────────────────▶ │ token-proxy  (Python, :8787) │
-│  custom model base  │                               │  · route & forward upstream  │
-│ http://127.0.0.1:8787/v1                            │  · meter usage → usage.jsonl │
+│  自定义模型 base URL  │                               │  · 路由并转发到上游            │
+│ http://127.0.0.1:8787/v1                            │  · 记账 → usage.jsonl        │
 └─────────────────────┘                               └──────────────┬──────────────┘
                                                                       │
-┌─────────────────────┐   passive read (side-channel) ┌──────────────▼──────────────┐
-│ WorkBuddy trace log │ ───────────────────────────▶ │ trace_reader (in-process)    │
-│ ~/.workbuddy/traces/│                               │  · built-in & direct models │
-│   */trace_*.json    │                               │  · incremental scan, 30s TTL │
-└─────────────────────┘                               └──────────────┬──────────────┘
-                                                                      │ GET /stats
-                                                              ┌───────▼────────┐
-                                                              │  token-widget  │
-                                                              │ (Tauri 2 + React)│
-                                                              └────────────────┘
+┌─────────────────────┐   旁路读取（零侵入）      ┌────────────────────▼──────────────┐
+│ WorkBuddy 本地 trace │ ───────────────────────▶ │ trace_reader（进程内）            │
+│ ~/.workbuddy/traces/│                          │  · 内置模型 + 直连自定义模型        │
+│   */trace_*.json    │                          │  · 增量扫描，TTL 可配置（默认 30s）│
+└─────────────────────┘                          └──────────────┬──────────────┘
+                                                                 │ GET /stats
+                                                         ┌───────▼────────┐
+                                                         │  token-widget  │
+                                                         │ (Tauri 2 + React)│
+                                                         └────────────────┘
 ```
 
-Two independent metering paths converge into one in-memory aggregate, so every request
-is counted exactly once — regardless of whether it went through the proxy or connected
-directly to the upstream provider.
+两条独立的记账通道汇入同一个内存聚合，任何请求都**恰好计一次**——无论它走代理转发
+还是直连上游。
 
-## Quick Start (dev mode)
+## 快速开始（开发模式）
 
-> Prerequisites: Python 3.10+, Node.js 20+, Rust toolchain (for the widget).
+> 前置依赖：Python 3.10+、Node.js 20+、Rust 工具链（仅 widget 需要）。
 
 ```bash
-# 1. backend — configure and start the proxy
+# 1. 后端 —— 配置并启动代理
 cd token-proxy
-cp config.example.json config.json   # then fill in your API keys
+cp config.example.json config.json   # 填入你的 API key
 pip install requests
-python main.py                       # listening on http://127.0.0.1:8787
+python main.py                       # 监听 http://127.0.0.1:8787
 
-# 2. point WorkBuddy at the proxy
-#    In WorkBuddy → Settings → custom model, set base URL:
+# 2. 让 WorkBuddy 指向代理
+#    WorkBuddy → 设置 → 自定义模型，base URL 填：
 #    http://127.0.0.1:8787/v1
 
-# 3. frontend — run the floating widget
+# 3. 前端 —— 启动悬浮窗
 cd ../token-widget
 npm install
 npm run tauri dev
 ```
 
-On Windows you can also double-click `token-proxy/start_dev.bat` to run the proxy
-with a visible console window.
+Windows 上也可直接双击 `token-proxy/start_dev.bat` 以可见窗口运行代理。
 
 ## HTTP API
 
-| Method | Path                  | Description                                          |
-|--------|-----------------------|------------------------------------------------------|
-| GET    | `/stats`              | Full aggregation (total / by_model / by_day / by_model_day / recent) |
-| GET    | `/requests`           | Recent records only                                  |
-| GET    | `/health`             | Health check with current call count                 |
-| GET    | `/config`             | Current config (API keys masked)                     |
-| PUT    | `/config`             | Update models / providers / routes (keys merged, masked values restored by id) |
-| POST   | `/keys`               | Manage provider keys: `set` (activate) / `add` / `del` |
-| POST   | `/v1/chat/completions`| Transparent OpenAI-compatible forwarding (sync + SSE) |
+| 方法 | 路径                   | 说明                                                        |
+|------|------------------------|-------------------------------------------------------------|
+| GET  | `/stats`               | 完整聚合（total / by_model / by_day / by_model_day / recent）|
+| GET  | `/requests`            | 仅最近记录                                                  |
+| GET  | `/health`              | 健康检查，附当前调用数                                      |
+| GET  | `/config`              | 当前配置（API key 已脱敏）                                  |
+| PUT  | `/config`              | 更新 channels / models（key 按 id 合并还原）                |
+| POST | `/keys`                | 管理渠道 key：`set`（激活）/ `add` / `del`                  |
+| POST | `/config/poll`         | 同步刷新频率——全局设置后端 trace 扫描 TTL                   |
+| POST | `/shutdown`            | flush 落盘后优雅退出后端进程                                |
+| POST | `/v1/chat/completions` | OpenAI 兼容透明转发（同步 + SSE）                           |
 
-## Data & Storage
+## 数据与存储
 
-- **Data directory** — `%APPDATA%\com.tauri-app.token-widget\token-proxy`
-  (override with `TOKEN_PROXY_DATA_DIR`; falls back to the script / exe directory).
-- `usage.jsonl` — append-only metered records written by the proxy for proxied requests.
-- `config.json` — provider/model configuration (user-specific, **never committed**).
-- `traces_state.json` — incremental-scan checkpoint for the trace reader (mtime + size).
-- `proxy.log` — operational log (no keys inside).
+- **数据目录** — `%APPDATA%\com.tauri-app.token-widget\token-proxy`
+  （可用环境变量 `TOKEN_PROXY_DATA_DIR` 覆盖；未设置时回退到脚本 / exe 所在目录）。
+- `usage.jsonl` — 代理为转发请求写入的追加式记账文件。
+- `config.json` — provider / 模型配置（用户私有，**绝不入库**）。
+- `traces_state.json` — trace 读取器的增量扫描断点（mtime + size）。
+- `proxy.log` — 运行日志（不含任何 key）。
 
-## Build & Release
+## 构建与发布
 
-> **Security note** — the installer embeds `resources/config.json`. To avoid shipping
-> your real API keys, always build releases through `build_release.bat` (it backs up
-> the private config, swaps in the sanitized `config.example.json`, builds, then
-> restores). Never run `tauri build` directly on a config that contains real keys.
+> **安全提示** — 安装包会把 `resources/config.json` 一并打包。为避免泄露你的真实
+> API key，发布构建**必须**走 `build_release.bat`（自动完成：备份私有配置 → 换成
+> 脱敏的 `config.example.json` → 构建 → 恢复）。绝不要在包含真实 key 的配置上直接
+> 执行 `tauri build`。
 
 ```bat
 build_release.bat
 ```
 
-Artifacts:
+构建产物：
 
-- `token-proxy/dist/token-proxy.exe` — standalone proxy binary (PyInstaller)
-- `token-widget/src-tauri/target/release/bundle/nsis/token-widget_0.1.0_x64-setup.exe` — NSIS installer
-- `token-widget/src-tauri/target/release/bundle/msi/token-widget_0.1.0_x64_en-US.msi` — MSI installer
+- `token-proxy/dist/token-proxy.exe` — 独立代理程序（PyInstaller）
+- `token-widget/src-tauri/target/release/bundle/nsis/token-widget_0.2.3_x64-setup.exe` — NSIS 安装包
+- `token-widget/src-tauri/target/release/bundle/msi/token-widget_0.2.3_x64_en-US.msi` — MSI 安装包
 
-Upload them to a GitHub release with:
+上传到 GitHub Release：
 
 ```bash
-gh release upload v0.1.0 token-proxy/dist/token-proxy.exe \
-  token-widget/src-tauri/target/release/bundle/nsis/token-widget_0.1.0_x64-setup.exe \
-  token-widget/src-tauri/target/release/bundle/msi/token-widget_0.1.0_x64_en-US.msi
+gh release upload v0.2.3 token-proxy/dist/token-proxy.exe \
+  token-widget/src-tauri/target/release/bundle/nsis/token-widget_0.2.3_x64-setup.exe \
+  token-widget/src-tauri/target/release/bundle/msi/token-widget_0.2.3_x64_en-US.msi
 ```
 
-> The bundled config ships with a placeholder key (`sk-REPLACE_WITH_YOUR_KEY`).
-> Users must configure their own keys in the widget settings panel after install.
+> 安装包内置占位 key（`sk-REPLACE_WITH_YOUR_KEY`），用户安装后需在 widget 设置
+> 面板填入自己的 key 才能使用。
 
-## Repository Layout
+## 仓库结构
 
 ```
 workbuddy-token-meter/
-├── token-proxy/           # Python backend: proxy + trace reader + aggregation
+├── token-proxy/           # Python 后端：代理 + trace 读取 + 聚合
 │   ├── main.py
 │   ├── proxy/
-│   │   ├── handler.py     # HTTP endpoints + transparent forwarding
-│   │   ├── aggregate.py   # in-memory aggregation & persistence
-│   │   ├── trace_reader.py# side-channel reader for WorkBuddy traces
-│   │   └── config.py      # constants, routing, proxy resolution
+│   │   ├── handler.py     # HTTP 端点 + 透明转发
+│   │   ├── aggregate.py   # 内存聚合与持久化
+│   │   ├── trace_reader.py# WorkBuddy trace 旁路读取器
+│   │   └── config.py      # 常量、路由、代理解析
 │   ├── config.example.json
 │   └── start_dev.bat
-└── token-widget/          # Tauri 2 + React 19 desktop floating widget
-    ├── src/               # React app (Recharts for trend charts)
+└── token-widget/          # Tauri 2 + React 19 桌面悬浮窗
+    ├── src/               # React 应用（Recharts 趋势图）
     └── src-tauri/
 ```
 

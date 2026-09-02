@@ -39,6 +39,12 @@ _progress = {"running": False, "total": 0, "scanned": 0, "records": 0, "done": T
 RECENT_KEEP = 200
 
 
+def set_scan_ttl(seconds: float):
+    """动态调整 trace 扫描间隔（与前端轮询频率同步，全局统一）。"""
+    global SCAN_TTL
+    SCAN_TTL = max(1.0, float(seconds))
+
+
 def _cache_files():
     return glob.glob(os.path.join(CACHE_DIR, "20*.jsonl"))
 

@@ -12,8 +12,8 @@ REM  After build, upload the artifacts with the gh command printed below.
 REM ============================================================
 cd /d %~dp0
 set RES=token-widget\src-tauri\resources
-set EXE_NAME=token-widget_0.1.0_x64-setup.exe
-set MSI_NAME=token-widget_0.1.0_x64_en-US.msi
+set EXE_NAME=token-widget_0.2.3_x64-setup.exe
+set MSI_NAME=token-widget_0.2.3_x64_en-US.msi
 
 if not exist "%RES%\config.json" (
   echo [ERR] %RES%\config.json not found - run from repo root.

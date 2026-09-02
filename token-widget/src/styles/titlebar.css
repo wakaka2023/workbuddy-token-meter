@@ -1,0 +1,57 @@
+.titlebar {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  flex-shrink: 0;
+}
+
+.title {
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.3px;
+  color: var(--text-strong);
+}
+
+.title-time {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  margin-left: 8px;
+}
+
+.icon-btn,
+.close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-sub);
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s, color 0.12s, transform 0.1s;
+}
+
+.icon-btn:hover,
+.close-btn:hover {
+  background: var(--hover-bg);
+  color: var(--text-bright);
+}
+
+.close-btn:hover {
+  background: var(--btn-danger-bg);
+  color: var(--btn-danger-text);
+}
+
+.icon-btn:active,
+.close-btn:active {
+  transform: scale(0.9);
+}
+
+.title-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}

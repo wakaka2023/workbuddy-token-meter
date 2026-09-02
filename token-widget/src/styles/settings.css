@@ -1,0 +1,662 @@
+.settings {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px 2px 8px;
+  user-select: text;
+}
+
+.settings-title {
+  font-size: 11px;
+  color: var(--text-sub);
+  margin-top: 4px;
+}
+
+.settings-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 2px;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 9px;
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  backdrop-filter: blur(10px);
+}
+
+.settings-tab {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-sub);
+  font-size: 11px;
+  padding: 5px 0;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.settings-tab:hover {
+  color: var(--text-main);
+  background: var(--hover-bg);
+}
+
+.settings-tab.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.theme-toggle {
+  display: flex;
+  gap: 6px;
+}
+
+.theme-btn {
+  flex: 1;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  color: var(--text-sub);
+  font-size: 11px;
+  padding: 5px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.theme-btn .swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid var(--card-border);
+  flex-shrink: 0;
+}
+
+.theme-btn.dark .swatch {
+  background: linear-gradient(168deg, #232b47, #101320);
+}
+
+.theme-btn.light .swatch {
+  background: linear-gradient(168deg, #f0f4fc, #dde5f5);
+}
+
+.theme-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.acrylic-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.acrylic-label {
+  font-size: 11px;
+  color: var(--text-sub);
+  flex-shrink: 0;
+}
+
+.acrylic-row input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  height: 4px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.acrylic-row input[type="number"] {
+  width: 60px;
+  padding: 2px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-main);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  outline: none;
+  text-align: center;
+}
+
+.acrylic-row input[type="number"]:focus {
+  border-color: var(--accent);
+}
+
+.acrylic-val {
+  font-size: 11px;
+  color: var(--text-sub);
+  text-align: right;
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-table {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.s-row {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.s-input {
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  color: var(--text-main);
+  font-size: 11px;
+  padding: 4px 6px;
+  outline: none;
+  min-width: 0;
+}
+
+.s-input:focus {
+  border-color: var(--accent);
+}
+
+.s-input.s-id {
+  flex: 2;
+  min-width: 60px;
+}
+
+/* 模型 id 字段（input + 下拉箭头） */
+.mdl-field {
+  display: flex;
+  flex: 2;
+  min-width: 60px;
+  position: relative;
+}
+
+.mdl-field .s-input.s-id {
+  border-radius: 6px 0 0 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.mdl-arrow {
+  width: 22px;
+  flex-shrink: 0;
+  background: var(--input-bg);
+  border: 1px solid var(--card-border);
+  border-left: none;
+  border-radius: 0 6px 6px 0;
+  color: var(--text-sub);
+  font-size: 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  padding: 0;
+}
+
+.mdl-arrow:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 渠道卡片头部（渠道名+显示名+操作按钮） */
+.ch-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: space-between;
+}
+
+.ch-title {
+  display: flex;
+  gap: 5px;
+  flex: 1;
+  min-width: 0;
+}
+
+/* 渠道头内：渠道名短、显示名长 */
+.ch-title .s-input.s-id {
+  flex: 1;
+  min-width: 70px;
+}
+
+.ch-title .s-input.s-lab {
+  flex: 1.6;
+  min-width: 80px;
+}
+
+.ch-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.ch-actions .add-btn {
+  white-space: nowrap;
+}
+
+.s-input.s-prov {
+  flex: 1;
+  min-width: 50px;
+}
+
+.s-input.s-num {
+  flex: 1;
+  min-width: 36px;
+}
+
+.s-input.s-base {
+  flex: 4;
+  min-width: 120px;
+}
+
+.s-input.s-lab {
+  flex: 1.2;
+  min-width: 50px;
+}
+
+.prov-block,
+.model-block {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  padding: 6px;
+}
+
+/* 模型行的块略紧凑（渠道卡片同构，padding 略小区分层级） */
+.model-block.model-row-slim {
+  padding: 5px 6px;
+}
+
+.price-row {
+  align-items: center;
+}
+
+.price-hint {
+  font-size: 10px;
+  color: var(--text-sub);
+  flex: 2;
+  min-width: 80px;
+}
+
+.fetch-row {
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+/* 渠道卡片内 key 池空态提示 */
+.key-empty-hint {
+  font-size: 10px;
+  color: var(--text-sub);
+  padding: 1px 0;
+}
+
+/* key 池折叠「添加 key」入口 */
+.key-add-toggle {
+  align-self: flex-start;
+  white-space: nowrap;
+}
+
+/* key 添加表单里的取消按钮 */
+.key-cancel-btn {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+/* 拉取/重新拉取按钮不换行 */
+.fetch-btn {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* 模型 id 候选浮层（fixed，不被滚动容器裁剪） */
+.dd-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 5000;
+  background: transparent;
+}
+
+.dd-panel {
+  position: fixed;
+  z-index: 5001;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  max-height: 320px;
+}
+
+.dd-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--card-border);
+}
+
+.dd-tip {
+  font-size: 10px;
+  color: var(--text-sub);
+  white-space: nowrap;
+}
+
+.dd-filter {
+  margin: 5px 8px 0;
+}
+
+.dd-list {
+  overflow-y: auto;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 200px;
+}
+
+.dd-item {
+  background: transparent;
+  border: none;
+  text-align: left;
+  color: var(--text-main);
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-family: ui-monospace, Consolas, monospace;
+  word-break: break-all;
+}
+
+.dd-item:hover {
+  background: var(--hover-bg);
+  color: var(--accent);
+}
+
+.dd-item.sel {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.dd-empty {
+  font-size: 11px;
+  color: var(--text-sub);
+  padding: 10px 8px;
+  line-height: 1.5;
+}
+
+.s-input.s-proxy-sel {
+  flex: 1.4;
+  min-width: 84px;
+}
+
+.s-input.s-proxy-url {
+  flex: 2.4;
+  min-width: 120px;
+}
+
+select.s-input option {
+  background: var(--select-opt-bg);
+  color: var(--text-main);
+}
+
+.del-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-sub);
+  font-size: 11px;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.del-btn:hover {
+  background: var(--btn-danger-bg);
+  color: var(--btn-danger-text);
+}
+
+.add-btn {
+  background: var(--accent-soft);
+  border: 1px dashed var(--accent-border);
+  color: var(--accent);
+  font-size: 11px;
+  padding: 4px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.add-btn:hover {
+  background: var(--accent-soft);
+  opacity: 0.85;
+}
+
+.key-block {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  background: var(--key-bg);
+}
+
+.key-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.key-prov {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.s-input.s-key-sel {
+  flex: 1;
+  max-width: 220px;
+}
+
+.key-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.key-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--chip-border);
+  background: var(--chip-bg);
+  color: var(--chip-text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.key-chip:hover {
+  border-color: var(--accent);
+}
+
+.key-chip.active {
+  border-color: var(--chip-active-border);
+  background: var(--chip-active-bg);
+  color: var(--chip-active-text);
+}
+
+.key-del {
+  color: var(--text-sub);
+  font-size: 10px;
+  padding: 0 2px;
+}
+
+.key-del:hover {
+  color: var(--red);
+}
+
+.key-add {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.s-input.s-key-name {
+  flex: 1;
+  min-width: 60px;
+}
+
+.s-input.s-key-val {
+  flex: 2;
+  min-width: 100px;
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.s-key-add-btn {
+  flex-shrink: 0;
+  padding: 4px 10px;
+}
+
+.s-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.save-msg {
+  flex: 1;
+  font-size: 11px;
+  color: var(--red);
+}
+
+.save-msg.ok {
+  color: var(--green);
+}
+
+.cancel-btn {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  color: var(--text-main);
+  font-size: 11px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.save-btn {
+  background: var(--accent);
+  border: none;
+  color: #fff;
+  font-size: 11px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.save-btn:hover {
+  opacity: 0.9;
+}
+
+.save-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.settings-desc {
+  font-size: 11px;
+  color: var(--text-dim, #8a90a6);
+  line-height: 1.5;
+  margin: 2px 0 8px;
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--text-dim, #8a90a6);
+  flex: 1;
+}
+
+.scan-actions {
+  gap: 8px;
+}
+
+.scan-progress {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--accent, #4f8cff);
+}
+
+.route-row {
+  gap: 8px;
+  padding: 6px 0;
+}
+
+.route-name {
+  flex: 1;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.route-tag {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.route-tag.proxy {
+  background: rgba(79, 140, 255, 0.15);
+  color: #4f8cff;
+}
+
+.route-tag.direct {
+  background: rgba(46, 194, 126, 0.15);
+  color: #2ec27e;
+}
+
+.route-tag.full {
+  background: rgba(46, 194, 126, 0.15);
+  color: #2ec27e;
+}
+
+.route-tag.service {
+  background: rgba(255, 170, 60, 0.15);
+  color: #ffaa3c;
+}
+
+.ledger-row {
+  gap: 8px;
+  padding: 5px 0;
+}
+
+.add-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

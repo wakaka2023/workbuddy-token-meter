@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import type {
   CacheScope,
@@ -24,6 +25,7 @@ import {
   ICON_MINIMIZE,
   ICON_SETTINGS,
   MINI_SIZE,
+  POLL_KEY,
   POLL_MS,
   PROXY,
   THEME_BG_RGB,
@@ -46,12 +48,18 @@ import {
   triggerScan,
   postKey,
   putConfig,
+  setPollInterval,
 } from "./api";
 import { Icon } from "./components/Icon";
 import MiniView from "./components/MiniView";
 import ExpandedView from "./components/ExpandedView";
 import SettingsPanel from "./components/SettingsPanel";
-import "./App.css";
+import "./styles/theme.css";
+import "./styles/base.css";
+import "./styles/mini.css";
+import "./styles/titlebar.css";
+import "./styles/settings.css";
+import "./styles/stats.css";
 
 function App() {
   const [stats, setStats] = useState<Stats | null>(null);
@@ -71,6 +79,12 @@ function App() {
     loadLS(CACHE_SCOPE_KEY, "today", (v) => (v === "model" ? "model" : "today")),
   );
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("appearance");
+  const [pollMs, setPollMs] = useState<number>(() =>
+    loadLS(POLL_KEY, POLL_MS, (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 1000 && n <= 600000 ? n : null;
+    }),
+  );
   const [channels, setChannels] = useState<ChannelRow[]>([]);
   const [models, setModels] = useState<ModelRow[]>([]);
   const [saving, setSaving] = useState(false);
@@ -112,13 +126,19 @@ function App() {
 
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, POLL_MS);
+    const t = setInterval(refresh, pollMs);
     return () => clearInterval(t);
-  }, []);
+  }, [pollMs]);
 
   useEffect(() => saveLS(THEME_KEY, theme), [theme]);
   useEffect(() => saveLS(ACRYLIC_KEY, String(acrylic)), [acrylic]);
   useEffect(() => saveLS(CACHE_SCOPE_KEY, cacheScope), [cacheScope]);
+  useEffect(() => saveLS(POLL_KEY, String(pollMs)), [pollMs]);
+
+  // 刷新频率全局统一：把前端设置同步到后端 trace 扫描间隔（后台静默，失败不阻塞）
+  useEffect(() => {
+    setPollInterval(pollMs).catch(() => {});
+  }, [pollMs]);
 
   // 亚克力强度实时覆盖 widget 背景透明度
   useEffect(() => {
@@ -131,7 +151,7 @@ function App() {
     }
   }, [theme, acrylic]);
 
-  const close = () => getCurrentWindow().close();
+  const close = () => invoke("quit_app");
   const minimize = () => getCurrentWindow().minimize();
 
   const toggleMode = async () => {
@@ -415,6 +435,8 @@ function App() {
             setCacheScope={setCacheScope}
             settingsTab={settingsTab}
             setSettingsTab={setSettingsTab}
+            pollMs={pollMs}
+            setPollMs={setPollMs}
             channels={channels}
             setChannels={setChannels}
             models={models}
@@ -455,7 +477,7 @@ function App() {
               : `无法连接 ${PROXY}`}
           <span className="status-right">
             {status ? `mode:${status.mode} · 转发:${status.forwarded}` : ""}
-            {POLL_MS / 1000}s
+            {pollMs / 1000}s
           </span>
         </footer>
       )}

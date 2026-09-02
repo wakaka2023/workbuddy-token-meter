@@ -1,12 +1,14 @@
 """HTTP 处理：/stats /config /keys 管理端点 + /chat/completions 透明转发。"""
 import json
+import os
+import threading
 import time
 from http.server import BaseHTTPRequestHandler
 
 import requests
 
 from . import config, ledger, route_switch, trace_cache
-from .aggregate import add_failed, add_usage, extract_usage, log_event
+from .aggregate import add_failed, add_usage, extract_usage, flush_pending, log_event
 from .config import (
     BACKOFF,
     CONFIG_FILE,
@@ -55,6 +57,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_error(self, code, err_type, message):
+        msg = json.dumps({"error": {"type": err_type, "message": message}}).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(msg)))
+        self.end_headers()
+        self.wfile.write(msg)
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -327,6 +337,21 @@ class Handler(BaseHTTPRequestHandler):
             "cached_at": cached_at,
         })
 
+    def _handle_set_poll(self):
+        """POST /config/poll：同步前端刷新频率，动态调整 trace 扫描间隔（全局统一）。
+        body: {"interval_ms": 30000}。"""
+        body = self._read_body() or {}
+        ms = body.get("interval_ms")
+        try:
+            ms = int(ms)
+        except (TypeError, ValueError):
+            self._send_json(400, {"ok": False, "error": "interval_ms required (number)"})
+            return
+        ms = min(max(ms, 1000), 600000)  # 钳制 1s ~ 10min
+        trace_cache.set_scan_ttl(ms / 1000.0)
+        log_event(f"[POLL] scan_ttl -> {ms / 1000.0:g}s (synced with frontend refresh)")
+        self._send_json(200, {"ok": True, "interval_ms": ms, "scan_ttl": ms / 1000.0})
+
     def _handle_mode_start(self):
         """POST /mode/start：切 full 模式（需已配置真实 key）。"""
         if not config._has_any_key():
@@ -345,6 +370,20 @@ class Handler(BaseHTTPRequestHandler):
         config.MODE = "service"
         log_event("[MODE] -> service (forwarding disabled)")
         self._send_json(200, {"ok": True, **mode_status()})
+
+    def _handle_shutdown(self):
+        """POST /shutdown：桌面端退出前调用——flush 落盘后优雅退出进程。
+
+        响应先返回（前台会立刻关窗口），真正退出延迟 300ms 交给后台线程，
+        避免 os._exit 打断当前连接的响应写出。
+        """
+        flush_pending()
+        log_event("[EXIT] shutdown requested, flushing and exiting")
+        self._send_json(200, {"ok": True})
+        threading.Thread(
+            target=lambda: (time.sleep(0.3), os._exit(0)),
+            daemon=True,
+        ).start()
 
     def _handle_keys(self):
         """POST /keys：管理某个渠道的 API key（set|add|del），成功后写回 config.json。
@@ -427,6 +466,9 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/import/workbuddy", "/import/workbuddy/"):
             self._handle_import()
             return
+        if path in ("/config/poll", "/config/poll/"):
+            self._handle_set_poll()
+            return
         if path.startswith("/models/") and path.rstrip("/").endswith("/route"):
             self._handle_route()
             return
@@ -439,23 +481,24 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/mode/stop", "/mode/stop/"):
             self._handle_mode_stop()
             return
+        if path in ("/shutdown", "/shutdown/"):
+            self._handle_shutdown()
+            return
         if not path.endswith("/chat/completions"):
             self.send_response(404)
             self.end_headers()
             return
+        self._forward_chat()
+
+    def _forward_chat(self):
+        """POST /chat/completions：透明转发到上游。service 模式返回 503。
+
+        支持 name→id 别名重写、模型级 key 覆盖、指数退避重试、
+        同步/流式两种响应，并统一走 add_usage/add_failed 记账。
+        """
         # 双模式门禁：service 模式下转发停用（扫描/统计/配置接口不受影响）
         if config.MODE != "full":
-            msg = json.dumps({
-                "error": {
-                    "type": "proxy_not_enabled",
-                    "message": "代理未启用：请在设置中配置 API Key 并启动代理",
-                }
-            }).encode("utf-8")
-            self.send_response(503)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(msg)))
-            self.end_headers()
-            self.wfile.write(msg)
+            self._send_error(503, "proxy_not_enabled", "代理未启用：请在设置中配置 API Key 并启动代理")
             return
         config._forwarded += 1
 
@@ -479,20 +522,9 @@ class Handler(BaseHTTPRequestHandler):
             body["model"] = real_id
             model = real_id
 
-        # 路由：模型名查 config.models 行，base 即上游地址（无第二跳）
         base = _model_base(model)
         if not base:
-            msg = json.dumps({
-                "error": {
-                    "type": "model_not_configured",
-                    "message": f"模型 '{model}' 未配置：请在设置 → 模型 中添加 base 地址后重试",
-                }
-            }).encode("utf-8")
-            self.send_response(404)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(msg)))
-            self.end_headers()
-            self.wfile.write(msg)
+            self._send_error(404, "model_not_configured", f"模型 '{model}' 未配置：请在设置 → 模型 中添加 base 地址后重试")
             return
         upstream = base.rstrip("/") + "/chat/completions"
         label = _model_label(model)
@@ -617,7 +649,6 @@ class Handler(BaseHTTPRequestHandler):
             # 客户端读完最后一行即关连接属正常收尾，usage 已在上一步解析，不刷堆栈
             interrupted = True
             log_event(f"[WARN] {label}/{model} client disconnected mid-stream")
-        # 200 但整条流无有效内容（上游占位/空流）无法重试（已发 200），记录定位
         if not saw_content and not last_usage and not interrupted:
             log_event(f"[ERR] {label}/{model} EMPTY STREAM (HTTP 200, no content chunk)")
         if last_usage:

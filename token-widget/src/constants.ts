@@ -2,6 +2,7 @@ import type { Theme } from "./types";
 
 export const PROXY = "http://127.0.0.1:8787";
 export const POLL_MS = 30000;
+export const POLL_KEY = "tw-poll-ms";
 export const MINI_SIZE = { w: 240, h: 132 };
 export const EXPD_SIZE = { w: 500, h: 640 };
 

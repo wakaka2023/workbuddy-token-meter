@@ -12,7 +12,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cost calculation with a multi-source price library
 - Sub-agent (expert team) token aggregation from `subagents/*.jsonl`
 
-## [0.2.1] - 2026-09-02
+## [0.2.3] - 2026-09-02
+
+### Added
+
+- **Exit / window close kills backend process** — `POST /shutdown` endpoint flushes
+  pending records and exits cleanly; Rust side calls it before `app.exit(0)` and on
+  `RunEvent::Exit` as a fallback; frontend × button triggers `quit_app` Tauri command.
+- **Configurable refresh interval** — new setting in the appearance tab (5–600s, step 5),
+  persisted to localStorage; `POLL_MS` replaced by a dynamic `pollMs` state that drives
+  both the frontend polling interval and the backend trace-scan TTL (via `POST /config/poll`).
+- **Last-refresh timestamp** — shows the time of the last successful `/stats` poll
+  in the status bar (removed after testing, functionality retained).
+- **Provider label fix for proxy-routed models** — changed `_model_label` to return
+  the channel provider display name (e.g. `B.AI`) instead of the model display name
+  (`GLM-5.3-Flash(B.AI测试)`), unifying labels across proxy and trace paths.
+
+### Changed
+
+- **mini window now uses a fixed size** (240×132) instead of content-adaptive sizing,
+  removing the ResizeObserver / fit-content complexity that caused unwanted "auto-resize"
+  behaviour. Users can freely drag to resize after switching modes.
+- **CSS split** — monolithic `App.css` (1416 lines) split into 6 module files under
+  `src/styles/`: `theme.css`, `base.css`, `mini.css`, `titlebar.css`, `settings.css`,
+  `stats.css`.
+- **SettingsPanel split** — 820-line component split into 5 tab components:
+  `AppearanceTab`, `ChannelTab`, `ModelTab`, `ScanTab`, `ConfigTab`.
+- **handler.py refactored** — the 200-line `do_POST` forwarding logic extracted into
+  `_forward_chat()`; added `_send_error()` helper to eliminate repeated error-response
+  boilerplate.
+- **Version bumped** to 0.2.3 (from 0.1.0).
+- **README now defaults to Chinese** — main `README.md` shows Chinese content;
+  English version moved to `README.en.md`.
 
 ### Added
 

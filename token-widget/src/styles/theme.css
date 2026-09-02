@@ -1,0 +1,124 @@
+:root {
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 13px;
+  color-scheme: dark;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* 深色（亚克力半透明） */
+.theme-dark {
+  color-scheme: dark;
+  --bg-top: rgba(34, 42, 66, 0.52);
+  --bg-bottom: rgba(14, 17, 30, 0.6);
+  --border-color: rgba(120, 150, 255, 0.16);
+  --inner-hl: rgba(255, 255, 255, 0.06);
+  --text-main: #eef1f8;
+  --text-bright: #f2f5fd;
+  --text-strong: #d7def2;
+  --text-sub: #aab1c4;
+  --text-dim: #8a92a8;
+  --card-bg: rgba(255, 255, 255, 0.05);
+  --card-border: rgba(255, 255, 255, 0.06);
+  --row-border: rgba(255, 255, 255, 0.04);
+  --input-bg: rgba(255, 255, 255, 0.07);
+  --input-border: rgba(255, 255, 255, 0.1);
+  --select-opt-bg: #1c1e28;
+  --hover-bg: rgba(255, 255, 255, 0.12);
+  --btn-danger-bg: rgba(255, 80, 80, 0.25);
+  --btn-danger-text: #ff6b6b;
+  --accent: #5b8cff;
+  --accent-soft: rgba(91, 140, 255, 0.12);
+  --accent-border: rgba(91, 140, 255, 0.4);
+  --green: #40be82;
+  --red: #ff6b6b;
+  --purple: #c792ea;
+  --amber: #ffc46b;
+  /* 语义色板：输入=蓝 输出=绿 缓存=紫 */
+  --c-in: #5bd4ff;
+  --c-out: #5ce6a8;
+  --c-cache: #c29bff;
+  --mini-in: #5bd4ff;
+  --mini-out: #5ce6a8;
+  --mini-cache: #c29bff;
+  --card-glow-in: linear-gradient(180deg, rgba(91, 212, 255, 0.2), transparent 70%);
+  --card-glow-today: linear-gradient(180deg, rgba(92, 230, 168, 0.18), transparent 70%);
+  --card-glow-cache: linear-gradient(180deg, rgba(194, 155, 255, 0.2), transparent 70%);
+  --card-glow-cost: linear-gradient(180deg, rgba(255, 196, 107, 0.18), transparent 70%);
+  --prov-bg: linear-gradient(135deg, rgba(79, 209, 255, 0.22), rgba(123, 108, 255, 0.22));
+  --prov-text: #8fdcff;
+  --prov-border: rgba(120, 170, 255, 0.25);
+  --chip-bg: rgba(255, 255, 255, 0.05);
+  --chip-border: rgba(255, 255, 255, 0.12);
+  --chip-text: #b8bcc9;
+  --chip-active-border: #40be82;
+  --chip-active-bg: rgba(64, 190, 130, 0.15);
+  --chip-active-text: #6fe0a8;
+  --dot-ok-glow: rgba(64, 190, 130, 0.7);
+  --dot-err-glow: rgba(255, 107, 107, 0.7);
+  --key-bg: rgba(255, 255, 255, 0.03);
+}
+
+/* 浅色（亚克力半透明） */
+.theme-light {
+  color-scheme: light;
+  --bg-top: rgba(248, 250, 255, 0.58);
+  --bg-bottom: rgba(226, 233, 249, 0.64);
+  --border-color: rgba(70, 100, 190, 0.24);
+  --inner-hl: rgba(255, 255, 255, 0.85);
+  --text-main: #1d2538;
+  --text-bright: #0e1526;
+  --text-strong: #2b3550;
+  --text-sub: #5a6478;
+  --text-dim: #7b8498;
+  --card-bg: rgba(255, 255, 255, 0.72);
+  --card-border: rgba(70, 100, 190, 0.13);
+  --row-border: rgba(30, 45, 90, 0.09);
+  --input-bg: rgba(255, 255, 255, 0.9);
+  --input-border: rgba(70, 100, 190, 0.22);
+  --select-opt-bg: #ffffff;
+  --hover-bg: rgba(60, 90, 180, 0.1);
+  --btn-danger-bg: rgba(229, 72, 77, 0.12);
+  --btn-danger-text: #d33a40;
+  --accent: #3d6ef2;
+  --accent-soft: rgba(61, 110, 242, 0.1);
+  --accent-border: rgba(61, 110, 242, 0.35);
+  --green: #17a968;
+  --red: #e5484d;
+  --purple: #8a4fd8;
+  --amber: #c98910;
+  /* 语义色板：输入=蓝 输出=绿 缓存=紫 */
+  --c-in: #0f86c9;
+  --c-out: #0f9d63;
+  --c-cache: #7a3fd8;
+  --mini-in: #0f86c9;
+  --mini-out: #0f9d63;
+  --mini-cache: #7a3fd8;
+  --card-glow-in: linear-gradient(180deg, rgba(15, 134, 201, 0.12), transparent 70%);
+  --card-glow-today: linear-gradient(180deg, rgba(15, 157, 99, 0.11), transparent 70%);
+  --card-glow-cache: linear-gradient(180deg, rgba(122, 63, 216, 0.12), transparent 70%);
+  --card-glow-cost: linear-gradient(180deg, rgba(201, 137, 16, 0.12), transparent 70%);
+  --prov-bg: linear-gradient(135deg, rgba(15, 134, 201, 0.12), rgba(122, 63, 216, 0.12));
+  --prov-text: #0f6ea8;
+  --prov-border: rgba(15, 110, 168, 0.3);
+  --chip-bg: rgba(255, 255, 255, 0.85);
+  --chip-border: rgba(70, 100, 190, 0.18);
+  --chip-text: #3a4560;
+  --chip-active-border: #17a968;
+  --chip-active-bg: rgba(23, 169, 104, 0.12);
+  --chip-active-text: #0e8a54;
+  --dot-ok-glow: rgba(23, 169, 104, 0.6);
+  --dot-err-glow: rgba(229, 72, 77, 0.6);
+  --key-bg: rgba(255, 255, 255, 0.6);
+}
