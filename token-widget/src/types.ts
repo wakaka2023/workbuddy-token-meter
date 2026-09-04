@@ -23,6 +23,8 @@ export interface Stats {
   total: Record<string, number>;
   by_model: Record<string, ModelAgg>;
   by_day: DayAgg[];
+  /** 小时级聚合（键为 YYYY-MM-DD HH），供趋势图近 24 小时视图 */
+  by_hour?: DayAgg[];
   by_model_day?: Record<string, Record<string, DayAgg>>;
   last_success: Record<string, string>;
   records: Array<Record<string, unknown>>;

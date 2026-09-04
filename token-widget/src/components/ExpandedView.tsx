@@ -1,20 +1,36 @@
-import { memo } from "react";
+import { memo, useState } from "react";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { Stats } from "../types";
-import { fmt } from "../utils";
+import {
+  RECENT_LIMITS,
+  RECENT_LIMIT_KEY,
+  TREND_RANGES,
+  TREND_RANGE_KEY,
+  type TrendRangeKey,
+} from "../constants";
+import { fmt, fmtTime, loadLS, saveLS } from "../utils";
 
 interface Props {
   stats: Stats | null;
 }
 
 function ExpandedView({ stats }: Props) {
+  const [trendKey, setTrendKey] = useState<TrendRangeKey>(() =>
+    loadLS(TREND_RANGE_KEY, "d30", (v) =>
+      TREND_RANGES.some((r) => r.key === v) ? (v as TrendRangeKey) : null,
+    ),
+  );
+  const [recentLimit, setRecentLimit] = useState<number>(() =>
+    loadLS(RECENT_LIMIT_KEY, 10, (v) =>
+      (RECENT_LIMITS as readonly number[]).includes(Number(v)) ? Number(v) : null,
+    ),
+  );
+
   const total = stats?.total;
-  const today = stats?.by_day[stats.by_day.length - 1];
+  const byDay = stats?.by_day ?? [];
+  const lastDay = byDay.length > 0 ? byDay[byDay.length - 1] : null;
   const totalTokens = total
     ? total.prompt_tokens + total.completion_tokens + total.cache_read_tokens
-    : 0;
-  const todayTokens = today
-    ? today.prompt_tokens + today.completion_tokens + today.cache_read_tokens
     : 0;
   const cacheRate =
     total && total.prompt_tokens > 0
@@ -29,12 +45,66 @@ function ExpandedView({ stats }: Props) {
         .sort((a, b) => b.calls - a.calls)
     : [];
 
-  const recent = stats ? [...stats.records].reverse().slice(0, 5) : [];
+  const recent = stats ? [...stats.records].reverse().slice(0, recentLimit) : [];
 
-  const trend = (stats?.by_day ?? []).map((d) => ({
-    ...d,
-    total: d.prompt_tokens + d.completion_tokens + d.cache_read_tokens,
-  }));
+  // 时间轴槽位：h24 生成连续 24 整点；d7/d30 生成连续自然日；all 从最早数据日到今天。
+  // 后端 by_hour/by_day 是"有记录的稀疏键"，直接画会时间轴断裂（0 点跳 8 点、缺天跳过），
+  // 须生成连续槽位逐点对齐、空缺补 0。
+  const slots = (() => {
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const out: { key: string }[] = [];
+    const now = new Date();
+    if (trendKey === "h24") {
+      for (let i = 23; i >= 0; i--) {
+        const t = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() - i, 0, 0);
+        out.push({
+          key: `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())} ${pad(t.getHours())}`,
+        });
+      }
+    } else {
+      const days = trendKey === "d7" ? 7 : trendKey === "d30" ? 30 : 0;
+      const first = days > 0
+        ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - (days - 1))
+        : (() => {
+            const d0 = stats?.by_day?.[0]?.date;
+            return d0 ? new Date(`${d0}T00:00:00`) : now;
+          })();
+      for (
+        let d = new Date(first.getFullYear(), first.getMonth(), first.getDate());
+        d.getTime() <= now.getTime();
+        d.setDate(d.getDate() + 1)
+      ) {
+        out.push({ key: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` });
+      }
+    }
+    return out;
+  })();
+  const isHourView = trendKey === "h24";
+  const trendSrc = isHourView ? stats?.by_hour : stats?.by_day;
+  const hasTrendData = (trendSrc?.length ?? 0) > 0;
+  const srcIndex = new Map((trendSrc ?? []).map((d) => [d.date, d]));
+  const trend = slots.map((s) => {
+    const d = srcIndex.get(s.key);
+    return {
+      date: s.key,
+      prompt_tokens: d?.prompt_tokens ?? 0,
+      completion_tokens: d?.completion_tokens ?? 0,
+      cache_read_tokens: d?.cache_read_tokens ?? 0,
+      calls: d?.calls ?? 0,
+      total:
+        (d?.prompt_tokens ?? 0) +
+        (d?.completion_tokens ?? 0) +
+        (d?.cache_read_tokens ?? 0),
+    };
+  });
+
+  // 今日卡片：by_day 最后一天是否真的今天，避免无请求日显示旧日期
+  const today = new Date();
+  const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const isToday = lastDay?.date === todayKey;
+  const todayTokens = isToday
+    ? lastDay.prompt_tokens + lastDay.completion_tokens + lastDay.cache_read_tokens
+    : 0;
 
   return (
     <>
@@ -47,7 +117,9 @@ function ExpandedView({ stats }: Props) {
         <div className="card today">
           <div className="card-label">今日 Token</div>
           <div className="card-value">{fmt(todayTokens)}</div>
-          <div className="card-sub">{today ? `${today.calls} 次调用` : "暂无数据"}</div>
+          <div className="card-sub">
+            {isToday && lastDay ? `${lastDay.calls} 次调用` : "暂无今日数据"}
+          </div>
         </div>
         <div className="card cache">
           <div className="card-label">缓存命中率</div>
@@ -57,29 +129,33 @@ function ExpandedView({ stats }: Props) {
         <div className="card cost">
           <div className="card-label">官方积分</div>
           <div className="card-value">{credits.toFixed(2)}</div>
-          <div className="card-sub">内置渠道扣费 · 自定义不计</div>
+          <div className="card-sub">内置渠道回传 · 自定义渠道可能不计</div>
         </div>
       </div>
 
-      {trend.length > 1 && (
-        <section className="panel chart-panel">
-          <div className="panel-title-row">
-            <span className="panel-title">Token 趋势（按天）</span>
-            <span className="chart-legend">
-              <span className="legend-item">
-                <span className="legend-dot" style={{ background: "var(--c-in)" }} />
-                输入
-              </span>
-              <span className="legend-item">
-                <span className="legend-dot" style={{ background: "var(--c-out)" }} />
-                输出
-              </span>
-              <span className="legend-item">
-                <span className="legend-dot" style={{ background: "var(--c-cache)" }} />
-                缓存
-              </span>
-            </span>
-          </div>
+      <section className="panel chart-panel">
+        <div className="panel-title-row">
+          <span className="panel-title">Token 趋势（按天）</span>
+          <span className="panel-controls">
+            <select
+              className="mini-select"
+              value={trendKey}
+              onChange={(e) => {
+                const k = e.target.value as TrendRangeKey;
+                setTrendKey(k);
+                saveLS(TREND_RANGE_KEY, k);
+              }}
+              title="趋势图时间范围"
+            >
+              {TREND_RANGES.map((r) => (
+                <option key={r.key} value={r.key}>
+                  {r.label}
+                </option>
+              ))}
+            </select>
+          </span>
+        </div>
+        {hasTrendData && trend.length > 1 ? (
           <div className="chart-box">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={trend}>
@@ -102,6 +178,11 @@ function ExpandedView({ stats }: Props) {
                   tick={{ fontSize: 9, fill: "var(--text-sub)" }}
                   tickLine={false}
                   axisLine={false}
+                  interval="preserveStartEnd"
+                  minTickGap={24}
+                  tickFormatter={(d: string) =>
+                    isHourView ? `${d.slice(5, 10)} ${d.slice(11, 13)}时` : d.slice(5)
+                  }
                 />
                 <YAxis
                   tick={{ fontSize: 9, fill: "var(--text-sub)" }}
@@ -119,6 +200,7 @@ function ExpandedView({ stats }: Props) {
                     color: "var(--text-main)",
                   }}
                   labelStyle={{ color: "var(--text-strong)" }}
+                  labelFormatter={(d) => (isHourView ? `${String(d).slice(5)}:00` : String(d))}
                 />
                 <Area type="monotone" dataKey="prompt_tokens" name="输入" stackId="1" stroke="var(--c-in)" fill="url(#gIn)" />
                 <Area type="monotone" dataKey="completion_tokens" name="输出" stackId="1" stroke="var(--c-out)" fill="url(#gOut)" />
@@ -126,78 +208,106 @@ function ExpandedView({ stats }: Props) {
               </AreaChart>
             </ResponsiveContainer>
           </div>
-        </section>
-      )}
-
-      <section className="panel">
-        <div className="panel-title">按模型</div>
-        <table className="model-table">
-          <thead>
-            <tr>
-              <th>模型</th>
-              <th>渠道</th>
-              <th>调用</th>
-              <th>输入</th>
-              <th>缓存率</th>
-              <th>积分</th>
-            </tr>
-          </thead>
-          <tbody>
-            {modelsStat.map((m) => (
-              <tr key={m.id}>
-                <td className="mono">{m.id}</td>
-                <td>
-                  <span className="prov-chip">{m.label}</span>
-                </td>
-                <td className="num">{m.calls}</td>
-                <td className="mono num">{fmt(m.prompt_tokens)}</td>
-                <td className="num">
-                  {m.prompt_tokens > 0
-                    ? ((m.cache_read_tokens / m.prompt_tokens) * 100).toFixed(0)
-                    : "0"}
-                  %
-                </td>
-                <td className="mono num">
-                  {m.credits > 0 ? m.credits.toFixed(2) : "—"}
-                </td>
-              </tr>
-            ))}
-            {modelsStat.length === 0 && (
-              <tr>
-                <td colSpan={6} className="empty">
-                  暂无数据
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+        ) : (
+          <div className="empty">所选时间范围内暂无数据</div>
+        )}
       </section>
 
       <section className="panel">
-        <div className="panel-title">最近请求</div>
+        <div className="panel-title-row">
+          <span className="panel-title">按模型</span>
+          <span className="panel-controls model-count">{modelsStat.length} 个模型</span>
+        </div>
+        <div className="model-scroll">
+          <table className="model-table">
+            <thead>
+              <tr>
+                <th>模型</th>
+                <th>渠道</th>
+                <th>调用</th>
+                <th>输入</th>
+                <th>缓存率</th>
+                <th>积分</th>
+              </tr>
+            </thead>
+            <tbody>
+              {modelsStat.map((m) => (
+                <tr key={m.id}>
+                  <td className="mono">{m.id}</td>
+                  <td>
+                    <span className="prov-chip">{m.label}</span>
+                  </td>
+                  <td className="num">{m.calls}</td>
+                  <td className="mono num">{fmt(m.prompt_tokens)}</td>
+                  <td className="num">
+                    {m.prompt_tokens > 0
+                      ? ((m.cache_read_tokens / m.prompt_tokens) * 100).toFixed(0)
+                      : "0"}
+                    %
+                  </td>
+                  <td className="mono num">
+                    {m.credits > 0 ? m.credits.toFixed(2) : "—"}
+                  </td>
+                </tr>
+              ))}
+              {modelsStat.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="empty">
+                    暂无数据
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-title-row">
+          <span className="panel-title">最近请求</span>
+          <select
+            className="mini-select"
+            value={recentLimit}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              setRecentLimit(v);
+              saveLS(RECENT_LIMIT_KEY, String(v));
+            }}
+            title="最近请求条数"
+          >
+            {RECENT_LIMITS.map((n) => (
+              <option key={n} value={n}>
+                近 {n} 条
+              </option>
+            ))}
+          </select>
+        </div>
         <ul className="req-list">
           {recent.map((r, i) => {
             const ok = r.ok !== false;
+            const errText = String(r.error ?? "");
+            const dur = Number(r.duration_ms ?? 0);
             return (
               <li key={i} className={ok ? "" : "req-err"}>
                 <span className={`req-status-dot ${ok ? "ok" : "err"}`} />
-                <span className="req-model mono" title={ok ? "" : String(r.error ?? "")}>
+                <span
+                  className="req-model mono"
+                  title={ok ? String(r.model ?? "") : errText || `HTTP ${r.status ?? "?"}`}
+                >
                   {String(r.model ?? "")}
                 </span>
                 <span className="req-tokens mono">
                   {fmt(Number(r.prompt_tokens ?? 0))}→{fmt(Number(r.completion_tokens ?? 0))}
                 </span>
-                <span className="req-ms mono">
-                  {r.duration_ms ? `${Math.round(Number(r.duration_ms))}ms` : "—"}
-                </span>
+                <span className="req-ms mono">{dur > 0 ? `${dur}ms` : "—"}</span>
                 <span className="req-cost mono">
                   {ok && Number(r.credit ?? 0) > 0
                     ? `${Number(r.credit).toFixed(2)}积分`
                     : ok
                       ? ""
-                      : `HTTP ${r.status ?? "?"}`}
+                      : errText.slice(0, 18) || `HTTP ${r.status ?? "?"}`}
                 </span>
-                <span className="req-time mono">{String(r.ts ?? "").slice(11)}</span>
+                <span className="req-time mono">{fmtTime(r.ts)}</span>
               </li>
             );
           })}

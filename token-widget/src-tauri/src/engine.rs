@@ -88,6 +88,12 @@ pub(crate) struct Rec {
     cache_read: i64,
     credit: f64,
     ok: bool,
+    /// result 与 call 的时间戳差（毫秒）；未配对落账时为 0
+    duration_ms: i64,
+    /// 非 completed 时的错误信息（providerData.error.message）
+    error: String,
+    /// call 行时间戳（毫秒），配对时用于计算耗时；持久化不含此字段
+    call_ts: i64,
     file: String,
     call_id: String,
     req_id: String,
@@ -116,6 +122,8 @@ pub(crate) struct Aggregate {
     total: Tot,
     by_model: Vec<(String, ModelAgg)>, // 保序（首见顺序）
     by_day: BTreeMap<String, DayAgg>,
+    /// 小时聚合（键 YYYY-MM-DD HH），仅供趋势图近 24 小时视图，to_json 输出最近一批
+    by_hour: BTreeMap<String, DayAgg>,
     by_model_day: BTreeMap<String, BTreeMap<String, DayAgg>>,
     last_success: Vec<(String, String)>,
     recent: Vec<Rec>,
@@ -173,6 +181,7 @@ impl Aggregate {
             total: Tot::default(),
             by_model: Vec::new(),
             by_day: BTreeMap::new(),
+            by_hour: BTreeMap::new(),
             by_model_day: BTreeMap::new(),
             last_success: Vec::new(),
             recent: Vec::new(),
@@ -223,6 +232,14 @@ impl Aggregate {
             md.completion += r.completion;
             md.cache_read += r.cache_read;
             md.calls += 1;
+        }
+        if r.ts.len() >= 13 {
+            let h = r.ts[..13].to_string();
+            let d = self.by_hour.entry(h).or_default();
+            d.prompt += r.prompt;
+            d.completion += r.completion;
+            d.cache_read += r.cache_read;
+            d.calls += 1;
         }
         match self.last_success.iter_mut().find(|(k, _)| k == &r.model) {
             Some((_, ts)) => *ts = r.ts.clone(),
@@ -380,6 +397,9 @@ fn rec_from_call(v: &Value, file: &str, custom: &HashMap<String, String>) -> Opt
         cache_read: sum_details(usage.get("inputTokensDetails"), "cached_tokens"),
         credit: pd.get("rawUsage").map(|ru| fnum(ru, "credit")).unwrap_or(0.0),
         ok: true,
+        duration_ms: 0,
+        error: String::new(),
+        call_ts: v.get("timestamp").and_then(|x| x.as_i64()).unwrap_or(0),
         file: file.to_string(),
         call_id,
         req_id: pd
@@ -536,6 +556,7 @@ impl Engine {
                     "prompt_tokens": r.prompt, "completion_tokens": r.completion,
                     "reasoning_tokens": r.reasoning, "cache_read_tokens": r.cache_read,
                     "credit": r.credit, "ok": r.ok,
+                    "duration_ms": r.duration_ms, "error": r.error,
                     "file": r.file, "callId": r.call_id, "reqId": r.req_id,
                 });
                 out.push_str(&serde_json::to_string(&rec).unwrap());
@@ -578,6 +599,9 @@ impl Engine {
                     cache_read: num(&v, "cache_read_tokens"),
                     credit: fnum(&v, "credit"),
                     ok: v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true),
+                    duration_ms: v.get("duration_ms").and_then(|x| x.as_i64()).unwrap_or(0),
+                    error: v.get("error").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    call_ts: 0,
                     file: v.get("file").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                     call_id: v.get("callId").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                     req_id: v.get("reqId").and_then(|x| x.as_str()).unwrap_or("").to_string(),
@@ -688,7 +712,25 @@ impl Engine {
                     }
                     "function_call_result" => {
                         if let Some(mut rec) = pending.remove(&key) {
-                            rec.ok = v.get("status").and_then(|x| x.as_str()) == Some("completed");
+                            let completed = v.get("status").and_then(|x| x.as_str()) == Some("completed");
+                            rec.ok = completed;
+                            // 耗时 = result 与 call 的时间戳差（同一行流内配对，近似请求时长）
+                            let rts = v.get("timestamp").and_then(|x| x.as_i64()).unwrap_or(0);
+                            let cts = rec.call_ts;
+                            if rts > 0 && cts > 0 {
+                                rec.duration_ms = (rts - cts).max(0);
+                            }
+                            if !completed {
+                                // 错误信息在 result 的 providerData.error.message（如中断/异常）
+                                if let Some(msg) = v
+                                    .get("providerData")
+                                    .and_then(|p| p.get("error"))
+                                    .and_then(|e| e.get("message"))
+                                    .and_then(|m| m.as_str())
+                                {
+                                    rec.error = msg.to_string();
+                                }
+                            }
                             new_recs.push(rec);
                             file_new += 1;
                         }
@@ -835,7 +877,25 @@ impl Aggregate {
                     "cache_read_tokens": r.cache_read,
                     "credit": r.credit,
                     "ok": r.ok,
+                    "duration_ms": r.duration_ms,
+                    "error": r.error,
                     "cost": 0,
+                })
+            })
+            .collect();
+        let by_hour: Vec<Value> = self
+            .by_hour
+            .iter()
+            .rev()
+            .take(48)
+            .rev() // 恢复时间升序
+            .map(|(hour, d)| {
+                json!({
+                    "date": hour,
+                    "prompt_tokens": d.prompt,
+                    "completion_tokens": d.completion,
+                    "cache_read_tokens": d.cache_read,
+                    "calls": d.calls,
                 })
             })
             .collect();
@@ -844,6 +904,7 @@ impl Aggregate {
             "total": total,
             "by_model": Value::Object(by_model),
             "by_day": by_day,
+            "by_hour": by_hour,
             "by_model_day": Value::Object(by_model_day),
             "last_success": Value::Object(last_success),
             "records": records,

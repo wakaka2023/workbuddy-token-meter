@@ -96,6 +96,33 @@
   margin-bottom: 6px;
 }
 
+.panel-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mini-select {
+  font-size: 10px;
+  padding: 1px 4px;
+  border-radius: 6px;
+  border: 1px solid var(--card-border);
+  background: var(--card-bg);
+  color: var(--text-sub);
+  cursor: pointer;
+  max-width: 90px;
+}
+
+.mini-select:focus {
+  outline: none;
+  border-color: var(--prov-border);
+}
+
+.model-count {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
 .chart-legend {
   display: flex;
   gap: 10px;
@@ -149,10 +176,33 @@
   padding: 6px 0;
 }
 
+.model-scroll {
+  max-height: 220px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.model-scroll::-webkit-scrollbar {
+  width: 5px;
+}
+
+.model-scroll::-webkit-scrollbar-thumb {
+  background: var(--row-border);
+  border-radius: 3px;
+}
+
 .model-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 11px;
+}
+
+.model-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--card-bg);
+  z-index: 1;
 }
 
 .model-table th {
