@@ -9,6 +9,8 @@ export const EXPD_SIZE = { w: 500, h: 640 };
 export const THEME_KEY = "tw-theme";
 export const ACRYLIC_KEY = "tw-acrylic";
 export const CACHE_SCOPE_KEY = "tw-cache-scope";
+// 自动增量扫描开关：默认关（首次打开保持空白轻量，用户自己决定是否开启）
+export const AUTO_SCAN_KEY = "tw-auto-scan";
 
 // 深/浅主题各自的基础 RGB（亚克力滑块插值透明度）
 export const THEME_BG_RGB: Record<Theme, [string, string]> = {

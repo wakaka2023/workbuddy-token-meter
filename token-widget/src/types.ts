@@ -14,6 +14,7 @@ export interface ModelAgg {
   cache_read_tokens: number;
   calls: number;
   cost: number;
+  credits: number; // 官方积分扣费（仅内置渠道，jsonl rawUsage.credit 聚合）
 }
 
 export interface Stats {

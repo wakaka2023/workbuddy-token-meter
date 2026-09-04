@@ -1,28 +1,50 @@
-//! 本地统计引擎：扫描 WorkBuddy trace 并聚合 token 用量。
+//! 本地统计引擎：扫描 WorkBuddy 会话 jsonl 并聚合 token 用量。
 //!
-//! v0.2.4 起统计不再依赖 token-proxy 进程/8787 端口，widget 内建引擎直读
-//! `~/.workbuddy/traces/*/trace_*.json`。设计对齐旧 Python 实现（trace_reader/
-//! trace_cache/aggregate 三模块语义），但去掉了"走代理模型从 trace 排除"的规则：
-//! WorkBuddy 无论内置还是自定义（含走代理）都会写 trace，trace 是唯一完备记账源，
-//! 因此引擎对所有 generation span 一视同仁，按 models.json 匹配判定自定义/内置。
+//! v0.3.0（feat/jsonl-source 分支）起数据源从 trace 切到会话 jsonl：
+//! `~/.workbuddy/projects/<项目>/<session-id>.jsonl`，每个会话一个文件、按行追加。
+//! 相比 trace（2939 文件 / 984 MB / 全量 60s+），jsonl 只有几十个文件、百 MB 级，
+//! 全量解析约 1 秒，且记录更全（trace 里部分 generation span 的 toolOutput 为空会被跳过）。
 //!
-//! 持久化：DATA_DIR/trace-cache/YYYY-MM-DD.jsonl（按天分片，供重启秒级重建聚合），
-//! DATA_DIR/trace-cache/_state.json（文件 mtime/size 增量去重）。缓存是派生物，
-//! 可随时全量重建；用户删原始 trace 不影响已有账本。
+//! 一次 LLM 请求在 jsonl 里对应两条行：
+//!   - `type=function_call`：带 `providerData.usage`（inputTokens/outputTokens/
+//!     inputTokensDetails[].cached_tokens/outputTokensDetails[].reasoning_tokens）、
+//!     `requestModelId`（`custom-local:` 前缀 = 自定义渠道）、`requestModelName`（展示名）、
+//!     `conversationRequestId`（与 workbuddy.db 积分表的 requestId 对应）。
+//!     auto 档（fast-model/balanced-model/deep-model）时 requestModelName 只是档位名，
+//!     真实路由的后端模型在 providerData.model（如 glm-5.3-flash），聚合以真实模型为键；
+//!     rawUsage.credit 为官方积分扣费（仅内置渠道有）。
+//!   - `type=function_call_result`：`status` = completed / incomplete，失败时带
+//!     `providerData.error`。
+//! 两行按 callId 配对，配对成功即落账；扫描结束时仍未配对的按成功落账（失败率约 0.2%，
+//! 且 result 行通常紧跟 call 行，跨批概率极低）。
+//!
+//! 注意：jsonl **没有响应时间字段**，三种推算方式（call→result 时间差、相邻事件间隔、
+//! 按 traceId 回查 trace）经实测全部不可行——前两者量级差 26 倍且与输出量无关，
+//! 后者因 jsonl 与 trace 的 ID 空间完全隔离（交叉比对命中率 0）无法关联。
+//! 因此统计里不再有 duration_ms。
+//!
+//! 增量：state 记录每个文件的已读字节偏移，只解析新增行；只读到最后一个换行符为止，
+//! 避免追加写入时的半行。文件变短（被 compact 重写）则 offset 归零重读，靠
+//! (file, callId) 去重保证不重复记账。
+//!
+//! 持久化：DATA_DIR/stats-cache/YYYY-MM-DD.jsonl（按天分片，供重启秒级重建聚合），
+//! DATA_DIR/stats-cache/_state.json（文件字节偏移）。缓存是派生物，可随时全量重建。
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read, Seek, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, Local};
+use chrono::{Local, TimeZone};
 use serde_json::{json, Value};
 
 const RECENT_KEEP: usize = 200;
 const SCAN_TTL: f64 = 30.0;
 const STATE_FILE: &str = "_state.json";
-const ENGINE_MARK: &str = "widget-v1";
+/// v2 = jsonl 数据源；v1 是 trace 数据源，缓存格式不兼容，靠标记隔离
+const ENGINE_MARK: &str = "widget-v2";
+const CACHE_DIR_NAME: &str = "stats-cache";
 
 // ---- 数据模型（与旧 /stats 返回契约一致）----
 
@@ -33,6 +55,7 @@ struct Tot {
     reasoning: i64,
     cache_read: i64,
     calls: i64,
+    credits: f64,
 }
 
 #[derive(Default, Clone)]
@@ -43,6 +66,7 @@ struct ModelAgg {
     reasoning: i64,
     cache_read: i64,
     calls: i64,
+    credits: f64,
 }
 
 #[derive(Default, Clone)]
@@ -62,10 +86,11 @@ struct Rec {
     completion: i64,
     reasoning: i64,
     cache_read: i64,
-    duration_ms: i64,
+    credit: f64,
     ok: bool,
-    trace_id: String,
-    span_id: String,
+    file: String,
+    call_id: String,
+    req_id: String,
 }
 
 #[derive(Clone, Copy)]
@@ -110,6 +135,7 @@ impl Aggregate {
         t.completion += r.completion;
         t.reasoning += r.reasoning;
         t.cache_read += r.cache_read;
+        t.credits += r.credit;
         t.calls += 1;
         match self.by_model.iter_mut().find(|(k, _)| k == &r.model) {
             Some((_, m)) => {
@@ -117,6 +143,7 @@ impl Aggregate {
                 m.completion += r.completion;
                 m.reasoning += r.reasoning;
                 m.cache_read += r.cache_read;
+                m.credits += r.credit;
                 m.calls += 1;
             }
             None => {
@@ -128,6 +155,7 @@ impl Aggregate {
                         completion: r.completion,
                         reasoning: r.reasoning,
                         cache_read: r.cache_read,
+                        credits: r.credit,
                         calls: 1,
                     },
                 ));
@@ -162,7 +190,7 @@ impl Aggregate {
     }
 }
 
-// ---- models.json 解析：自定义模型 id/name -> provider 显示名 ----
+// ---- models.json 解析：自定义模型名 -> provider 显示名 ----
 
 fn provider_from_url(url: &str) -> String {
     let host = url
@@ -215,170 +243,110 @@ fn load_model_index(models_json: &Path) -> HashMap<String, String> {
     idx
 }
 
-// ---- trace 解析（对齐 Python trace_reader）----
-
-/// toolInput 可能是序列化 JSON 字符串/JSON 对象/裸文本。优先解析 JSON 取首条
-/// system content；截断无法解析时只搜前 2000 字符（system 恒为首条消息，避免
-/// user 消息里的 "powered by" 误匹配）。
-fn powered_from_tool_input(v: &Value) -> Option<String> {
-    let hay = match v {
-        Value::String(s) => {
-            // 可解析 JSON：取其 system content 全文再搜；否则退化搜前 2000 字符
-            match serde_json::from_str::<Value>(s) {
-                Ok(inner) => system_text(&inner).unwrap_or_else(|| s[..byte_floor(s, 2000)].to_string()),
-                Err(_) => s[..byte_floor(s, 2000)].to_string(),
-            }
-        }
-        other => system_text(other)?,
-    };
-    search_powered(&hay, usize::MAX)
-}
-
-/// 返回 <= limit 的最大 char 边界字节下标（避免切在多字节字符中间 panic）
-fn byte_floor(s: &str, limit: usize) -> usize {
-    let mut idx = s.len().min(limit);
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    idx
-}
-
-/// 从 dict/list 形态中取首条 system content 纯文本
-fn system_text(v: &Value) -> Option<String> {
-    let mut raw: Option<String> = None;
-    if let Value::Object(map) = v {
-        if let Some(Value::String(c)) = map.get("content") {
-            raw = Some(c.clone());
-        } else if let Some(Value::Array(msgs)) = map.get("messages") {
-            raw = first_system(msgs);
-        }
-    } else if let Value::Array(arr) = v {
-        raw = first_system(arr);
-    }
-    raw
-}
-
-fn first_system(msgs: &[Value]) -> Option<String> {
-    for m in msgs {
-        if let Some(map) = m.as_object() {
-            if map.get("role").and_then(|x| x.as_str()) == Some("system") {
-                if let Some(Value::String(c)) = map.get("content") {
-                    return Some(c.clone());
-                }
-            }
-        }
-    }
-    None
-}
-
-/// 大小写不敏感搜 "powered by"，捕获模型名：以大写/数字开头，取到
-/// 换行/引号/反斜杠为止，trim 后返回。限前 limit 字符防大 system prompt。
-fn search_powered(s: &str, limit: usize) -> Option<String> {
-    let hay = &s[..s.len().min(limit)];
-    let lower = hay.to_lowercase();
-    let needle = "powered by";
-    let mut search_from = 0;
-    while let Some(rel) = lower[search_from..].find(needle) {
-        let mut i = search_from + rel + needle.len();
-        // 跳过后续空白
-        let bytes = hay.as_bytes();
-        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\r' || bytes[i] == b'\n') {
-            i += 1;
-        }
-        // 取模型名字符：字母数字 . - _ ( ) : 空格，到引号/反斜杠/换行停。
-        // 模型名可能含中文（如自定义名 "GLM-5.3-Flash(B.AI测试)"），c>=0x80 覆盖 UTF-8 续字节
-        let mut end = i;
-        while end < bytes.len() {
-            let c = bytes[end];
-            if c == b'"' || c == b'\\' || c == b'\r' || c == b'\n' {
-                break;
-            }
-            if !(c.is_ascii_alphanumeric() || c >= 0x80 || matches!(c, b'.' | b'-' | b'_' | b'(' | b')' | b':' | b' ')) {
-                break;
-            }
-            end += 1;
-        }
-        let name = hay[i..end].trim().to_string();
-        if name.starts_with(|c: char| c.is_ascii_uppercase() || c.is_ascii_digit()) {
-            return Some(name);
-        }
-        search_from = end.max(search_from + needle.len());
-    }
-    None
-}
-
-/// toolOutput -> (usage, model)。非 JSON / 无 usage 返回 None。
-fn parse_tool_output(out: &Value) -> Option<(Value, String)> {
-    let v = match out {
-        Value::String(s) => serde_json::from_str::<Value>(s).ok()?,
-        other => other.clone(),
-    };
-    let arr = match v {
-        Value::Array(a) => a,
-        Value::Object(_) => vec![v],
-        _ => return None,
-    };
-    let first = arr.first()?.as_object()?;
-    let usage = first.get("usage")?.clone();
-    let model = first.get("model").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    Some((usage, model))
-}
+// ---- 会话 jsonl 解析 ----
 
 fn num(v: &Value, key: &str) -> i64 {
     v.get(key).and_then(|x| x.as_i64()).unwrap_or(0)
 }
 
-/// details 子对象取值：v = completion_tokens_details / prompt_tokens_details
-fn nested(v: &Value, key: &str) -> i64 {
-    v.get(key).and_then(|x| x.as_i64()).unwrap_or(0)
+fn fnum(v: &Value, key: &str) -> f64 {
+    v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0)
 }
 
-fn to_local(iso: &str) -> String {
-    if let Ok(dt) = DateTime::parse_from_rfc3339(iso) {
-        let local: DateTime<Local> = dt.with_timezone(&Local);
-        return local.format("%Y-%m-%d %H:%M:%S").to_string();
+/// 毫秒时间戳 -> 本地 "YYYY-MM-DD HH:MM:SS"
+fn ms_to_local(ms: i64) -> String {
+    let secs = ms / 1000;
+    let nsec = ((ms % 1000) * 1_000_000) as u32;
+    match Local.timestamp_opt(secs, nsec) {
+        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+        _ => Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
     }
-    Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-/// 从 generation span 提取一条记账记录。
-/// powered 命中自定义名/ID -> 按自定义计（label=provider）；否则要求大写/数字开头
-/// -> 内置。usage 两个主字段都 0 视为无用量跳过。
-fn rec_from_span(sp: &Value, custom: &HashMap<String, String>) -> Option<Rec> {
-    let powered = powered_from_tool_input(sp.get("toolInput")?)?.trim().to_string();
-    if powered.is_empty() {
+/// usage 里的 details 字段可能是数组（[{cached_tokens: N}]）或对象，统一求和
+fn sum_details(v: Option<&Value>, key: &str) -> i64 {
+    match v {
+        Some(Value::Array(a)) => a.iter().map(|x| x.get(key).and_then(|y| y.as_i64()).unwrap_or(0)).sum(),
+        Some(Value::Object(_)) => v.and_then(|x| x.get(key)).and_then(|x| x.as_i64()).unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// 从 `type=function_call` 行提取一条记账记录。
+/// requestModelId 带 `custom-local:` 前缀 = 自定义渠道，其余为内置模型。
+/// auto 档（fast-model/balanced-model/deep-model）的 requestModelName 只是档位名
+/// （快速/均衡/极致），实际路由的后端模型在 providerData.model（如 glm-5.3-flash），
+/// 此时以真实模型为聚合键、档位名进 label，与桌面端展示一致。
+/// rawUsage.credit 为官方积分扣费（仅内置渠道有，自定义渠道无此字段记 0）。
+/// usage 两个主字段都 0 视为无用量跳过；无 callId 无法与 result 配对，也跳过。
+fn rec_from_call(v: &Value, file: &str, custom: &HashMap<String, String>) -> Option<Rec> {
+    let pd = v.get("providerData")?;
+    let usage = pd.get("usage")?;
+    if !usage.is_object() {
         return None;
     }
-    let is_custom = custom.contains_key(&powered);
-    if !is_custom && !powered.starts_with(|c: char| c.is_ascii_uppercase() || c.is_ascii_digit()) {
-        return None;
-    }
-    let label = if is_custom {
-        custom.get(&powered).cloned().unwrap_or_else(|| "自定义".into())
-    } else {
-        "内置".into()
-    };
-    let (usage, _model) = parse_tool_output(sp.get("toolOutput")?)?;
-    let prompt = num(&usage, "prompt_tokens");
-    let completion = num(&usage, "completion_tokens");
+    let prompt = usage.get("inputTokens").and_then(|x| x.as_i64()).unwrap_or(0);
+    let completion = usage.get("outputTokens").and_then(|x| x.as_i64()).unwrap_or(0);
     if prompt == 0 && completion == 0 {
         return None;
     }
-    let pdet = usage.get("prompt_tokens_details").unwrap_or(&Value::Null);
-    let cdet = usage.get("completion_tokens_details").unwrap_or(&Value::Null);
+    let call_id = v.get("callId").and_then(|x| x.as_str())?.to_string();
+    if call_id.is_empty() {
+        return None;
+    }
+    let model_id = pd.get("requestModelId").and_then(|x| x.as_str()).unwrap_or("");
+    let is_custom = model_id.starts_with("custom-local:");
+    let is_tier = matches!(model_id, "fast-model" | "balanced-model" | "deep-model");
+    let backend_model = pd.get("model").and_then(|x| x.as_str()).unwrap_or("").trim();
+    let model_name = pd.get("requestModelName").and_then(|x| x.as_str()).unwrap_or("").trim();
+    let model = if is_tier && !backend_model.is_empty() {
+        backend_model.to_string()
+    } else if model_name.is_empty() {
+        model_id.to_string()
+    } else {
+        model_name.to_string()
+    };
+    if model.is_empty() {
+        return None;
+    }
+    let label = if is_custom {
+        custom.get(&model).cloned().unwrap_or_else(|| "自定义".into())
+    } else {
+        match model_id {
+            "fast-model" => "内置·快速",
+            "balanced-model" => "内置·均衡",
+            "deep-model" => "内置·极致",
+            _ => "内置",
+        }
+        .into()
+    };
     Some(Rec {
-        ts: to_local(sp.get("startedAt").and_then(|x| x.as_str()).unwrap_or("")),
-        model: powered,
+        ts: ms_to_local(v.get("timestamp").and_then(|x| x.as_i64()).unwrap_or(0)),
+        model,
         label,
         prompt,
         completion,
-        reasoning: nested(cdet, "reasoning_tokens"),
-        cache_read: nested(pdet, "cached_tokens"),
-        duration_ms: sp.get("duration").and_then(|x| x.as_i64()).unwrap_or(0),
-        ok: sp.get("status").and_then(|x| x.as_str()) == Some("ok"),
-        trace_id: sp.get("traceId").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        span_id: sp.get("spanId").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        reasoning: sum_details(usage.get("outputTokensDetails"), "reasoning_tokens"),
+        cache_read: sum_details(usage.get("inputTokensDetails"), "cached_tokens"),
+        credit: pd.get("rawUsage").map(|ru| fnum(ru, "credit")).unwrap_or(0.0),
+        ok: true,
+        file: file.to_string(),
+        call_id,
+        req_id: pd
+            .get("conversationRequestId")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
     })
+}
+
+/// 从 offset 处读到文件尾。失败返回 None（下一轮再试）。
+fn read_from_offset(path: &Path, offset: u64) -> Option<String> {
+    let mut f = fs::File::open(path).ok()?;
+    f.seek(SeekFrom::Start(offset)).ok()?;
+    let mut s = String::new();
+    f.read_to_string(&mut s).ok()?;
+    Some(s)
 }
 
 // ---- 扫描引擎 ----
@@ -387,9 +355,9 @@ pub struct Engine {
     home: PathBuf,
     cache_dir: PathBuf,
     agg: Aggregate,
-    /// trace 文件绝对路径 -> [mtime, size]
-    state: HashMap<String, Vec<i64>>,
-    /// (traceId, spanId) 去重；懒加载自缓存
+    /// 会话 jsonl 绝对路径 -> 已读字节偏移
+    state: HashMap<String, u64>,
+    /// (file, callId) 去重；懒加载自缓存
     seen: Option<HashSet<(String, String)>>,
     last_scan: f64,
     scan_ttl: f64,
@@ -402,7 +370,7 @@ impl Engine {
             .or_else(|_| std::env::var("HOME"))
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("."));
-        let cache_dir = data_dir.join("trace-cache");
+        let cache_dir = data_dir.join(CACHE_DIR_NAME);
         let _ = fs::create_dir_all(&cache_dir);
         Engine {
             home,
@@ -429,7 +397,7 @@ impl Engine {
         if let Ok(rd) = fs::read_dir(&self.cache_dir) {
             for e in rd.flatten() {
                 let name = e.file_name().to_string_lossy().into_owned();
-                if name.ends_with(".jsonl") && name.len() == 15 {
+                if name.ends_with(".jsonl") {
                     out.push(e.path());
                 }
             }
@@ -438,7 +406,7 @@ impl Engine {
         out
     }
 
-    /// 懒加载 seen：从按天缓存扫出全部 (traceId, spanId)
+    /// 懒加载 seen：从按天缓存扫出全部 (file, callId)
     fn seen_keys(&mut self) -> &HashSet<(String, String)> {
         if self.seen.is_none() {
             let mut set = HashSet::new();
@@ -446,11 +414,11 @@ impl Engine {
                 let Ok(content) = fs::read_to_string(&fp) else { continue };
                 for line in content.lines() {
                     if let Ok(v) = serde_json::from_str::<Value>(line) {
-                        if let (Some(t), Some(s)) = (
-                            v.get("traceId").and_then(|x| x.as_str()),
-                            v.get("spanId").and_then(|x| x.as_str()),
+                        if let (Some(f), Some(c)) = (
+                            v.get("file").and_then(|x| x.as_str()),
+                            v.get("callId").and_then(|x| x.as_str()),
                         ) {
-                            set.insert((t.to_string(), s.to_string()));
+                            set.insert((f.to_string(), c.to_string()));
                         }
                     }
                 }
@@ -461,11 +429,8 @@ impl Engine {
     }
 
     fn save_state(&self) {
-        let files: serde_json::Map<String, Value> = self
-            .state
-            .iter()
-            .map(|(k, v)| (k.clone(), json!(v)))
-            .collect();
+        let files: serde_json::Map<String, Value> =
+            self.state.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
         let payload = json!({ "engine": ENGINE_MARK, "files": files });
         if let Ok(s) = serde_json::to_string(&payload) {
             let _ = fs::write(self.cache_dir.join(STATE_FILE), s);
@@ -475,17 +440,14 @@ impl Engine {
     fn load_state(&mut self) {
         let Ok(content) = fs::read_to_string(self.cache_dir.join(STATE_FILE)) else { return };
         let Ok(v) = serde_json::from_str::<Value>(&content) else { return };
-        // 仅认本引擎标记；旧 Python 版 state 忽略（首次触发全量重建）
+        // 仅认本引擎标记；trace 版（v1）state 忽略，避免偏移语义混用
         if v.get("engine").and_then(|x| x.as_str()) != Some(ENGINE_MARK) {
             return;
         }
         if let Some(files) = v.get("files").and_then(|x| x.as_object()) {
             for (k, val) in files {
-                if let Some(arr) = val.as_array() {
-                    let nums: Vec<i64> = arr.iter().filter_map(|x| x.as_i64()).collect();
-                    if nums.len() == 2 {
-                        self.state.insert(k.clone(), nums);
-                    }
+                if let Some(off) = val.as_u64() {
+                    self.state.insert(k.clone(), off);
                 }
             }
         }
@@ -505,8 +467,8 @@ impl Engine {
                     "ts": r.ts, "model": r.model, "label": r.label,
                     "prompt_tokens": r.prompt, "completion_tokens": r.completion,
                     "reasoning_tokens": r.reasoning, "cache_read_tokens": r.cache_read,
-                    "duration_ms": r.duration_ms, "ok": r.ok,
-                    "traceId": r.trace_id, "spanId": r.span_id,
+                    "credit": r.credit, "ok": r.ok,
+                    "file": r.file, "callId": r.call_id, "reqId": r.req_id,
                 });
                 out.push_str(&serde_json::to_string(&rec).unwrap());
                 out.push('\n');
@@ -522,7 +484,7 @@ impl Engine {
         self.load_state();
         let n = self.rebuild_from_cache();
         if n == 0 {
-            self.last_scan = 0.0; // 无缓存 → 首次 get_stats 触发全量建缓存
+            self.last_scan = 0.0; // 无缓存 → 首次扫描触发全量建缓存
         }
         n
     }
@@ -534,22 +496,23 @@ impl Engine {
             let Ok(content) = fs::read_to_string(&fp) else { continue };
             for line in content.lines() {
                 let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-                let (Some(tid), Some(sid)) = (
-                    v.get("traceId").and_then(|x| x.as_str()),
-                    v.get("spanId").and_then(|x| x.as_str()),
-                ) else { continue };
+                let ts = v.get("ts").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                if ts.is_empty() {
+                    continue;
+                }
                 all.push(Rec {
-                    ts: v.get("ts").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    ts,
                     model: v.get("model").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
                     label: v.get("label").and_then(|x| x.as_str()).unwrap_or("内置").to_string(),
                     prompt: num(&v, "prompt_tokens"),
                     completion: num(&v, "completion_tokens"),
                     reasoning: num(&v, "reasoning_tokens"),
                     cache_read: num(&v, "cache_read_tokens"),
-                    duration_ms: num(&v, "duration_ms"),
-                    ok: v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false),
-                    trace_id: tid.to_string(),
-                    span_id: sid.to_string(),
+                    credit: fnum(&v, "credit"),
+                    ok: v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true),
+                    file: v.get("file").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    call_id: v.get("callId").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    req_id: v.get("reqId").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                 });
             }
         }
@@ -573,26 +536,28 @@ impl Engine {
         let _ = fs::remove_file(self.cache_dir.join(STATE_FILE));
     }
 
-    fn collect_trace_files(&self) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        let traces_root = self.home.join(".workbuddy").join("traces");
-        let Ok(pid_dir) = fs::read_dir(traces_root) else { return out };
-        for e in pid_dir.flatten() {
-            if !e.path().is_dir() {
-                continue;
-            }
-            let Ok(rd) = fs::read_dir(e.path()) else { continue };
-            for f in rd.flatten() {
-                let name = f.file_name().to_string_lossy().into_owned();
-                if name.starts_with("trace_") && name.ends_with(".json") {
-                    out.push(f.path());
-                }
+    fn walk_jsonl(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                Self::walk_jsonl(&p, out);
+            } else if p.extension().and_then(|x| x.to_str()) == Some("jsonl") {
+                out.push(p);
             }
         }
+    }
+
+    /// 枚举 ~/.workbuddy/projects 下所有会话 jsonl
+    fn collect_session_files(&self) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let root = self.home.join(".workbuddy").join("projects");
+        Self::walk_jsonl(&root, &mut out);
+        out.sort();
         out
     }
 
-    /// 扫描：增量解析变更文件；force 时清缓存全量重建。返回新增记录数。
+    /// 扫描：按字节偏移增量解析新增行；force 时清缓存全量重建。返回新增记录数。
     /// 由外部 Mutex<Engine> 串行化，函数内不再自持锁。
     pub fn scan(&mut self, force: bool) -> usize {
         {
@@ -606,61 +571,76 @@ impl Engine {
             self.clear_cache();
         }
         let custom = load_model_index(&self.models_json());
-        let paths = self.collect_trace_files();
+        let paths = self.collect_session_files();
         {
             let mut p = self.progress.lock().unwrap();
             p.running = true;
             p.total = paths.len();
         }
-        // 复用缓存里的 (traceId,spanId) 做 upsert 去重
         let mut seen = self.seen_keys().clone();
         let mut new_recs: Vec<Rec> = Vec::new();
+        // (file, callId) -> 待与 result 配对的记录
+        let mut pending: HashMap<(String, String), Rec> = HashMap::new();
         let mut scanned = 0usize;
+
         for p in &paths {
             let Ok(meta) = fs::metadata(p) else { continue };
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            let key = vec![mtime, meta.len() as i64];
+            let size = meta.len();
             let path_key = p.to_string_lossy().into_owned();
-            if self.state.get(&path_key) == Some(&key) {
+            let mut offset = self.state.get(&path_key).copied().unwrap_or(0);
+            // 文件变短说明被 compact 重写，从头重读（靠 seen 去重避免重复记账）
+            if size < offset {
+                offset = 0;
+            }
+            if size == offset {
+                continue;
+            }
+            let Some(text) = read_from_offset(p, offset) else { continue };
+            // 只处理到最后一个换行，避免追加写入的半行
+            let end = text.rfind('\n').map(|i| i + 1).unwrap_or(0);
+            if end == 0 {
                 continue;
             }
             scanned += 1;
-            let Ok(content) = fs::read_to_string(p) else { continue };
-            let Ok(data) = serde_json::from_str::<Value>(&content) else { continue };
-            let Some(spans) = data.get("spans").and_then(|x| x.as_array()) else {
-                self.state.insert(path_key, key);
-                continue;
-            };
+            let new_offset = offset + end as u64;
             let mut file_new = 0usize;
-            for sp in spans {
-                if sp.get("type").and_then(|x| x.as_str()) != Some("generation") {
-                    continue;
+
+            for line in text[..end].lines() {
+                let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+                let Some(call_id) = v.get("callId").and_then(|x| x.as_str()) else { continue };
+                let key = (path_key.clone(), call_id.to_string());
+                match v.get("type").and_then(|x| x.as_str()).unwrap_or("") {
+                    "function_call" => {
+                        if seen.contains(&key) {
+                            continue;
+                        }
+                        let Some(rec) = rec_from_call(&v, &path_key, &custom) else { continue };
+                        seen.insert(key.clone());
+                        pending.insert(key, rec);
+                    }
+                    "function_call_result" => {
+                        if let Some(mut rec) = pending.remove(&key) {
+                            rec.ok = v.get("status").and_then(|x| x.as_str()) == Some("completed");
+                            new_recs.push(rec);
+                            file_new += 1;
+                        }
+                    }
+                    _ => {}
                 }
-                let (Some(tid), Some(sid)) = (
-                    sp.get("traceId").and_then(|x| x.as_str()),
-                    sp.get("spanId").and_then(|x| x.as_str()),
-                ) else { continue };
-                let dedup = (tid.to_string(), sid.to_string());
-                if seen.contains(&dedup) {
-                    continue;
-                }
-                let Some(rec) = rec_from_span(sp, &custom) else { continue };
-                seen.insert(dedup);
+            }
+            // 本文件扫完仍未配对的一律按成功落账，不留到下一批
+            for (_, rec) in pending.drain() {
                 new_recs.push(rec);
                 file_new += 1;
             }
-            self.state.insert(path_key, key);
+            self.state.insert(path_key, new_offset);
             {
                 let mut p = self.progress.lock().unwrap();
                 p.scanned = scanned;
                 p.records += file_new;
             }
         }
+
         let n = new_recs.len();
         if n > 0 {
             self.append_recs(&new_recs);
@@ -698,6 +678,7 @@ impl Engine {
             "reasoning_tokens": agg.total.reasoning,
             "cache_read_tokens": agg.total.cache_read,
             "calls": agg.total.calls,
+            "credits": agg.total.credits,
             "cost": 0,
         });
         let mut by_model = serde_json::Map::new();
@@ -712,6 +693,7 @@ impl Engine {
                     "reasoning_tokens": m.reasoning,
                     "cache_read_tokens": m.cache_read,
                     "calls": m.calls,
+                    "credits": m.credits,
                     "cost": 0,
                 }),
             );
@@ -763,7 +745,7 @@ impl Engine {
                     "completion_tokens": r.completion,
                     "reasoning_tokens": r.reasoning,
                     "cache_read_tokens": r.cache_read,
-                    "duration_ms": r.duration_ms,
+                    "credit": r.credit,
                     "ok": r.ok,
                     "cost": 0,
                 })
@@ -790,4 +772,3 @@ impl Engine {
         })
     }
 }
-

@@ -19,7 +19,7 @@ function ExpandedView({ stats }: Props) {
     total && total.prompt_tokens > 0
       ? ((total.cache_read_tokens / total.prompt_tokens) * 100).toFixed(1)
       : "0.0";
-  const cost = total?.cost ?? 0;
+  const credits = total?.credits ?? 0;
   const calls = total?.calls ?? 0;
 
   const modelsStat = stats
@@ -54,9 +54,9 @@ function ExpandedView({ stats }: Props) {
           <div className="card-sub">cache {fmt(total?.cache_read_tokens ?? 0)}</div>
         </div>
         <div className="card cost">
-          <div className="card-label">预估费用</div>
-          <div className="card-value">¥{cost.toFixed(2)}</div>
-          <div className="card-sub">按 config 单价</div>
+          <div className="card-label">官方积分</div>
+          <div className="card-value">{credits.toFixed(2)}</div>
+          <div className="card-sub">内置渠道扣费 · 自定义不计</div>
         </div>
       </div>
 
@@ -138,7 +138,7 @@ function ExpandedView({ stats }: Props) {
               <th>调用</th>
               <th>输入</th>
               <th>缓存率</th>
-              <th>费用</th>
+              <th>积分</th>
             </tr>
           </thead>
           <tbody>
@@ -156,7 +156,9 @@ function ExpandedView({ stats }: Props) {
                     : "0"}
                   %
                 </td>
-                <td className="mono num">¥{m.cost.toFixed(2)}</td>
+                <td className="mono num">
+                  {m.credits > 0 ? m.credits.toFixed(2) : "—"}
+                </td>
               </tr>
             ))}
             {modelsStat.length === 0 && (
@@ -188,8 +190,8 @@ function ExpandedView({ stats }: Props) {
                   {r.duration_ms ? `${Math.round(Number(r.duration_ms))}ms` : "—"}
                 </span>
                 <span className="req-cost mono">
-                  {ok && r.cost !== undefined
-                    ? `${Number(r.cost).toFixed(4)}元`
+                  {ok && Number(r.credit ?? 0) > 0
+                    ? `${Number(r.credit).toFixed(2)}积分`
                     : ok
                       ? ""
                       : `HTTP ${r.status ?? "?"}`}

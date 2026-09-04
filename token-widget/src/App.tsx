@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import type {
@@ -17,6 +17,7 @@ import type {
 } from "./types";
 import {
   ACRYLIC_KEY,
+  AUTO_SCAN_KEY,
   CACHE_SCOPE_KEY,
   EXPD_SIZE,
   ICON_CLOSE,
@@ -84,6 +85,9 @@ function App() {
       return Number.isFinite(n) && n >= 1000 && n <= 600000 ? n : null;
     }),
   );
+  const [autoScan, setAutoScan] = useState<boolean>(() =>
+    loadLS(AUTO_SCAN_KEY, false, (v) => (v === "1" ? true : v === "0" ? false : null)),
+  );
   const [channels, setChannels] = useState<ChannelRow[]>([]);
   const [models, setModels] = useState<ModelRow[]>([]);
   const [saving, setSaving] = useState(false);
@@ -109,9 +113,16 @@ function App() {
     return () => clearInterval(t);
   }, [scanProgress?.running]);
 
+  // 扫描完成（done）后自动刷新统计，让用户看到最新结果
+  useEffect(() => {
+    if (scanProgress?.done) refresh();
+  }, [scanProgress?.done]);
+
   const refresh = async () => {
     try {
-      setStats(await fetchStats());
+      const s = await fetchStats();
+      // 后台扫描持锁时后端返回 Null：保持上一次数据，不要把界面刷空
+      if (s) setStats(s);
       setOnline(true);
       try {
         setStatus(await fetchStatus());
@@ -123,18 +134,44 @@ function App() {
     }
   };
 
+  // 自动增量扫描：开关打开后，按刷新频率周期性触发增量扫描（默认关，首开保持空白）
+  const autoScanRef = useRef(autoScan);
+  const scanningRef = useRef(false);
+  autoScanRef.current = autoScan;
+  scanningRef.current = Boolean(scanProgress?.running);
+
+  const runIncrementalScan = async () => {
+    if (scanningRef.current) return;
+    try {
+      await triggerScan(false);
+      setScanProgress({ running: true, total: 0, scanned: 0, records: 0, done: false });
+    } catch {
+      /* 扫描失败不打断轮询 */
+    }
+  };
+
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, pollMs);
+    const t = setInterval(() => {
+      if (autoScanRef.current) void runIncrementalScan();
+      refresh();
+    }, pollMs);
     return () => clearInterval(t);
   }, [pollMs]);
+
+  // 打开开关时立即扫一次，不必等下一个轮询周期
+  useEffect(() => {
+    if (autoScan) void runIncrementalScan();
+  }, [autoScan]);
+
+  useEffect(() => saveLS(AUTO_SCAN_KEY, autoScan ? "1" : "0"), [autoScan]);
 
   useEffect(() => saveLS(THEME_KEY, theme), [theme]);
   useEffect(() => saveLS(ACRYLIC_KEY, String(acrylic)), [acrylic]);
   useEffect(() => saveLS(CACHE_SCOPE_KEY, cacheScope), [cacheScope]);
   useEffect(() => saveLS(POLL_KEY, String(pollMs)), [pollMs]);
 
-  // 刷新频率全局统一：把前端设置同步到后端 trace 扫描间隔（后台静默，失败不阻塞）
+  // 刷新频率全局统一：把前端设置同步到后端 jsonl 扫描间隔（后台静默，失败不阻塞）
   useEffect(() => {
     setPollInterval(pollMs).catch(() => {});
   }, [pollMs]);
@@ -204,9 +241,28 @@ function App() {
 
   const handleModeStart = async () => {
     try {
-      const s = await modeStart();
-      setStatus(s);
-      setOpMsg("代理已启动");
+      await modeStart();
+      setOpMsg("启动中，请稍候…");
+      // 轮询 12 秒等待代理就绪，避免一直停留在"启动中"
+      for (let i = 0; i < 12; i++) {
+        await new Promise(r => setTimeout(r, 1000));
+        try {
+          const st = await fetchStatus();
+          if (st.running) {
+            setStatus(st);
+            setOpMsg("代理已启动");
+            return;
+          }
+        } catch { /* 继续轮询 */ }
+      }
+      // 超时后获取最终状态
+      try {
+        const st = await fetchStatus();
+        setStatus(st);
+        setOpMsg(st.running ? "代理已启动" : "代理启动超时，请检查端口 8787 是否被占用");
+      } catch {
+        setOpMsg("代理启动超时，请检查端口 8787 是否被占用");
+      }
     } catch (e) {
       setOpMsg(`启动失败：${e instanceof Error ? e.message : String(e)}`);
     }
@@ -264,6 +320,7 @@ function App() {
     setSaveMsg("");
     try {
       const cfg = await fetchConfig();
+      const hasLocal = Object.keys(cfg.channels ?? {}).length > 0 || Object.keys(cfg.models ?? {}).length > 0;
       setChannels(
         Object.entries(cfg.channels ?? {}).map(([id, ch]) => {
           const raw = ch.proxy ?? "auto";
@@ -296,8 +353,15 @@ function App() {
           };
         }),
       );
-      setRouteModels(await fetchRouteModels());
-      setLedger(await fetchLedger());
+      // 路由模型/台账来自 WorkBuddy 全局 models.json：仅当本地已导入（有渠道/模型）才读取。
+      // 全新安装打开设置面板保持空状态，点「从 workbuddy 导入」后本地有数据才展示。
+      if (hasLocal) {
+        setRouteModels(await fetchRouteModels());
+        setLedger(await fetchLedger());
+      } else {
+        setRouteModels([]);
+        setLedger(null);
+      }
       setStatus(await fetchStatus());
       setSaveMsg("");
     } catch (e) {
@@ -470,6 +534,8 @@ function App() {
             ledger={ledger}
             scanProgress={scanProgress}
             opMsg={opMsg}
+            autoScan={autoScan}
+            setAutoScan={setAutoScan}
             onModeStart={handleModeStart}
             onModeStop={handleModeStop}
             onImport={handleImport}

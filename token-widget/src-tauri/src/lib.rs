@@ -1,7 +1,7 @@
 //! v0.2.4 入口：统计/配置/扫描全部本地化，token-proxy 降级为按需转发器。
 //!
 //! 架构变化（对应 0.2.4 重构）：
-//! - 统计引擎（engine.rs）直读 ~/.workbuddy/traces，不再依赖 8787 端口；
+//! - 统计引擎（engine.rs）直读 ~/.workbuddy/projects 下的会话 jsonl，不再依赖 8787 端口；
 //! - 配置管理（configstore.rs）直读写数据目录 config.json（与代理共用同一文件）；
 //! - 代理仅在存在"走代理路由模型"（models.json url 指向 127.0.0.1:8787）或用户
 //!   主动点击启动时才拉起，并以 /health 确认存活（修旧版"端口被占=假存活"）；
@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -30,9 +30,13 @@ use tauri::{
 
 const PROXY_PORT: u16 = 8787;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// 代理拉起失败后的最小重试间隔：sync_proxy 高频调用（配置/路由/导入后都触发）时，
+/// 若 /health 未就绪就会反复 spawn 新进程堆积；冷却期内不再重复拉起。
+const PROXY_RETRY_COOLDOWN: Duration = Duration::from_secs(10);
 
 struct ProxyCtl {
     spawned: bool,
+    last_attempt: Option<Instant>,
 }
 
 struct AppState {
@@ -87,9 +91,9 @@ fn http_req(port: u16, method: &str, path: &str, body: &[u8]) -> Result<Value, S
     let mut s = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
     s.set_read_timeout(Some(Duration::from_millis(2000))).ok();
     s.set_write_timeout(Some(Duration::from_millis(2000))).ok();
-    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
     if body.is_empty() {
-        req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 0\r\nConnection: close\r\n");
+        req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     }
     let mut raw = req.into_bytes();
     raw.extend_from_slice(body);
@@ -135,6 +139,8 @@ fn proxy_launch(app: &tauri::AppHandle, state: &AppState) -> Result<Value, Strin
     };
     let dir = data_dir(app);
     let mode = if state.store.has_any_key() { "full" } else { "service" };
+    // spawn 前先登记尝试时间；轮询失败时 sync_proxy 依据它进入冷却，不再连环拉起
+    state.proxy.lock().unwrap().last_attempt = Some(Instant::now());
     let _ = Command::new(&exe)
         .env("TOKEN_PROXY_DATA_DIR", &dir)
         .env("TOKEN_PROXY_LEAN", "1")
@@ -142,10 +148,11 @@ fn proxy_launch(app: &tauri::AppHandle, state: &AppState) -> Result<Value, Strin
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("spawn {} failed: {e}", exe.display()))?;
-    // 轮询 /health：端口通但非本代理（旧版假存活）会被 /health 404 拦下
+    // 轮询 /health：端口通但非本代理（旧版假存活）会被 /health 404 拦下。
+    // PyInstaller onefile 冷启动需解压临时目录，给足 10s（20×500ms）再判失败。
     let mut ok = false;
-    for _ in 0..10 {
-        thread::sleep(Duration::from_millis(400));
+    for _ in 0..20 {
+        thread::sleep(Duration::from_millis(500));
         if proxy_health() {
             ok = true;
             break;
@@ -159,22 +166,40 @@ fn proxy_launch(app: &tauri::AppHandle, state: &AppState) -> Result<Value, Strin
     Ok(json!({ "ok": true, "mode": mode }))
 }
 
-/// 需要代理（存在走代理模型）但未运行 → 自动拉起。配置/导入/路由操作后调用。
+/// 需要代理（存在走代理模型）但未运行 → 后台拉起。配置/导入/路由操作后调用，
+/// 不阻塞命令线程（避免保存/切路由时卡 UI）。
 fn sync_proxy(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
-    if state.store.proxy_needed() && !proxy_health() {
-        let _ = proxy_launch(app, &state);
+    if !state.store.proxy_needed() || proxy_health() {
+        return;
     }
+    let mut ctl = state.proxy.lock().unwrap();
+    // 距上次尝试不足冷却期则跳过：防止一次失败被后续多次 sync_proxy 连环触发堆积进程
+    if ctl
+        .last_attempt
+        .is_some_and(|t| t.elapsed() < PROXY_RETRY_COOLDOWN)
+    {
+        return;
+    }
+    ctl.last_attempt = Some(Instant::now());
+    drop(ctl);
+    let app2 = app.clone();
+    thread::spawn(move || {
+        let state = app2.state::<AppState>();
+        let _ = proxy_launch(&app2, &state);
+    });
 }
 
 // ---- 统计命令（本地引擎，不依赖代理）----
 
 #[tauri::command]
 fn get_stats(state: tauri::State<AppState>) -> Value {
-    let mut e = state.engine.lock().unwrap();
-    if e.lazy_scan_needed() {
-        let _ = e.scan(false);
-    }
+    // 首屏不自动扫描：用户首次安装打开就是空白状态，自己选择何时全量扫描。
+    // 全量扫描在后台线程持锁运行（可能数十秒）：此处 try_lock，拿不到锁就
+    // 立即返回现有快照，绝不让 UI 线程阻塞在锁上（否则轮询刷新会卡住界面）。
+    let Ok(e) = state.engine.try_lock() else {
+        return serde_json::Value::Null;
+    };
     e.snapshot()
 }
 
@@ -193,7 +218,10 @@ fn force_scan(state: tauri::State<AppState>, force: bool) -> Result<Value, Strin
 
 #[tauri::command]
 fn get_scan_progress(state: tauri::State<AppState>) -> Value {
-    let e = state.engine.lock().unwrap();
+    let Ok(e) = state.engine.try_lock() else {
+        // 引擎被全量扫描持锁中，返回"running"让前端继续轮询
+        return json!({ "running": true, "total": 0, "scanned": 0, "records": 0, "done": false });
+    };
     e.progress_snapshot()
 }
 
@@ -258,13 +286,14 @@ fn get_ledger(state: tauri::State<AppState>) -> Value {
 
 #[tauri::command]
 fn proxy_start(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<Value, String> {
-    proxy_launch(&app, &state).map(|r| {
-        let mut v = r;
-        let s = v.as_object_mut().unwrap();
-        s.insert("status".into(), proxy_status_raw());
-        s.insert("running".into(), json!(true));
-        v
-    })
+    // 后台线程拉起并轮询 health，命令立即返回——避免启动慢时同步阻塞 10s 卡死 UI。
+    // 启动结果由前端轮询 get_status（running 字段）感知。
+    let app2 = app.clone();
+    thread::spawn(move || {
+        let state = app2.state::<AppState>();
+        let _ = proxy_launch(&app2, &state);
+    });
+    Ok(json!({ "ok": true, "starting": true }))
 }
 
 #[tauri::command]
@@ -302,6 +331,14 @@ fn quit_app(app: tauri::AppHandle, state: tauri::State<AppState>) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        // 单实例：第二实例启动即退出，并把「再次启动」信号转给主实例（用户再点图标=唤出窗口）
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let dir = app
@@ -313,7 +350,7 @@ pub fn run() {
             {
                 let mut e = engine.lock().unwrap();
                 let n = e.boot();
-                eprintln!("[ENGINE] boot from trace-cache: {n} records");
+                eprintln!("[ENGINE] boot from jsonl cache: {n} records");
             }
             let store = ConfigStore::new(dir.clone());
             // 首次运行复制捆绑的空配置模板（无捆绑则写最小默认）
@@ -331,10 +368,9 @@ pub fn run() {
             app.manage(AppState {
                 engine,
                 store,
-                proxy: Mutex::new(ProxyCtl { spawned: false }),
+                proxy: Mutex::new(ProxyCtl { spawned: false, last_attempt: None }),
             });
-            // 有走代理模型则按需拉起；纯内置用户不启动任何子进程
-            sync_proxy(app.handle());
+            // 不再自动拉起代理——首次打开什么都不做，用户需要时手动点"启动代理"
 
             let toggle = MenuItem::with_id(app, "toggle", "显示/隐藏", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;

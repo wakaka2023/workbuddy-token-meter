@@ -45,6 +45,8 @@ interface Props {
   ledger: LedgerData | null;
   scanProgress: ScanProgress | null;
   opMsg: string;
+  autoScan: boolean;
+  setAutoScan: (v: boolean) => void;
   onModeStart: () => void;
   onModeStop: () => void;
   onImport: () => void;
@@ -60,7 +62,7 @@ function SettingsPanel({
   channels, setChannels, models, setModels,
   newKey, setNewKey, saveMsg, setSaveMsg, saving,
   onSave, onClose, onKeyOp, onFetchModels,
-  status, routeModels, ledger, scanProgress, opMsg,
+  status, routeModels, ledger, scanProgress, opMsg, autoScan, setAutoScan,
   onModeStart, onModeStop, onImport, onRouteSwitch, onScan, onRefresh,
 }: Props) {
   return (
@@ -124,7 +126,13 @@ function SettingsPanel({
       )}
 
       {settingsTab === "scan" && (
-        <ScanTab scanProgress={scanProgress} onScan={onScan} />
+        <ScanTab
+          scanProgress={scanProgress}
+          onScan={onScan}
+          autoScan={autoScan}
+          setAutoScan={setAutoScan}
+          pollMs={pollMs}
+        />
       )}
 
       {settingsTab === "config" && (

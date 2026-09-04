@@ -49,9 +49,8 @@ export async function switchRoute(
   return invoke<{ ok: boolean; message: string; url: string }>("switch_route", { name, route });
 }
 
-export async function modeStart(): Promise<ProxyStatus> {
+export async function modeStart(): Promise<void> {
   await invoke<{ ok: boolean }>("proxy_start");
-  return fetchStatus();
 }
 
 export async function modeStop(): Promise<ProxyStatus> {

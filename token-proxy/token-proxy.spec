@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['main.py'],
+    ['C:/Users/35317/WorkBuddy/workbuddy-token-meter/token-proxy/main.py'],
     pathex=[],
     binaries=[],
     datas=[],
