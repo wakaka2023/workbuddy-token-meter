@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import type {
   CacheScope,
   ChannelCfg,
@@ -48,6 +49,7 @@ import {
   triggerScan,
   postKey,
   putConfig,
+  setAutoScanEnabled,
   setPollInterval,
 } from "./api";
 import { Icon } from "./components/Icon";
@@ -115,29 +117,40 @@ function App() {
 
   // 扫描完成（done）后自动刷新统计，让用户看到最新结果
   useEffect(() => {
-    if (scanProgress?.done) refresh();
+    if (scanProgress?.done) void refreshRef.current();
   }, [scanProgress?.done]);
 
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  const settingsRef = useRef(showSettings);
+  settingsRef.current = showSettings;
+  // 记住已渲染的数据版本：gen 相同后端只回占位（data=null），跳过整包 setStats 与重渲染
+  const lastGenRef = useRef<number | null>(null);
   const refresh = async () => {
     try {
-      const s = await fetchStats();
-      // 后台扫描持锁时后端返回 Null：保持上一次数据，不要把界面刷空
-      if (s) setStats(s);
+      const r = await fetchStats(lastGenRef.current);
+      lastGenRef.current = r.gen;
+      if (r.data) setStats(r.data);
       setOnline(true);
-      try {
-        setStatus(await fetchStatus());
-      } catch {
-        /* status 可选 */
+      // get_status 含网络探测与磁盘 IO；mini 模式无状态栏不查，展开/设置页才需要
+      if (modeRef.current === "expanded" || settingsRef.current) {
+        try {
+          setStatus(await fetchStatus());
+        } catch {
+          /* status 可选 */
+        }
       }
     } catch {
       setOnline(false);
     }
   };
+  // setInterval 只建一次，回调经 ref 永远调用最新闭包，避免捕获首帧 mode/state
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
 
   // 自动增量扫描：开关打开后，按刷新频率周期性触发增量扫描（默认关，首开保持空白）
-  const autoScanRef = useRef(autoScan);
+  // 扫描互斥：进度轮询期间不重复触发扫描（后端 force_scan 还有 try_lock 兜底）
   const scanningRef = useRef(false);
-  autoScanRef.current = autoScan;
   scanningRef.current = Boolean(scanProgress?.running);
 
   const runIncrementalScan = async () => {
@@ -151,16 +164,29 @@ function App() {
   };
 
   useEffect(() => {
-    refresh();
-    const t = setInterval(() => {
-      if (autoScanRef.current) void runIncrementalScan();
-      refresh();
-    }, pollMs);
+    void refreshRef.current();
+    // 自动增量扫描由后端守护线程按 scan_ttl 静默执行，扫到新记录 emit scan-done 再刷新。
+    // 前端轮询只做一次轻量 get_stats（gen 相同只回占位），不再每轮触发扫描。
+    const t = setInterval(() => void refreshRef.current(), pollMs);
     return () => clearInterval(t);
   }, [pollMs]);
 
-  // 打开开关时立即扫一次，不必等下一个轮询周期
+  // 后端守护线程扫到新记录后即时刷新，不必等下一个轮询周期
   useEffect(() => {
+    const unlisten = listen<{ records: number }>("scan-done", () => void refreshRef.current());
+    return () => {
+      void unlisten.then((u) => u());
+    };
+  }, []);
+
+  // 切到展开模式立即拉一次（含代理状态），避免状态栏空白等到下个轮询周期
+  useEffect(() => {
+    if (mode === "expanded") void refreshRef.current();
+  }, [mode]);
+
+  // 开关同步到后端守护线程（决定是否按周期自动扫描）；打开时立即扫一次，不必等下一个轮询周期
+  useEffect(() => {
+    setAutoScanEnabled(autoScan).catch(() => {});
     if (autoScan) void runIncrementalScan();
   }, [autoScan]);
 

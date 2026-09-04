@@ -18,12 +18,20 @@ export interface ModelAgg {
 }
 
 export interface Stats {
+  /** 聚合版本号：仅数据真正变化时 +1，前端据此跳过无变化的整包重渲染 */
+  gen?: number;
   total: Record<string, number>;
   by_model: Record<string, ModelAgg>;
   by_day: DayAgg[];
   by_model_day?: Record<string, Record<string, DayAgg>>;
   last_success: Record<string, string>;
   records: Array<Record<string, unknown>>;
+}
+
+/** get_stats 响应：gen 未变时 data 为 null，前端保留旧 stats 跳过重渲染 */
+export interface StatsResp {
+  gen: number;
+  data: Stats | null;
 }
 
 export interface KeyCfg {

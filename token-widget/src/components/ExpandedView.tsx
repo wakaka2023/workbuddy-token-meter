@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { Stats } from "../types";
 import { fmt } from "../utils";
@@ -207,4 +208,4 @@ function ExpandedView({ stats }: Props) {
   );
 }
 
-export default ExpandedView;
+export default memo(ExpandedView);

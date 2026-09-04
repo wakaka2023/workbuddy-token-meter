@@ -7,14 +7,14 @@ import type {
   ProxyStatus,
   RouteModel,
   ScanProgress,
-  Stats,
+  StatsResp,
 } from "./types";
 
 // 统计 / 配置 / 扫描 / 代理控制 全部走本地 Tauri 命令（v0.2.4 起不依赖 8787）。
 // 仅「拉取上游渠道模型列表」需要代理进程（真实 key + 出网），走 proxyApi。
 
-export async function fetchStats(): Promise<Stats> {
-  return invoke<Stats>("get_stats");
+export async function fetchStats(prevGen?: number | null): Promise<StatsResp> {
+  return invoke<StatsResp>("get_stats", { prevGen: prevGen ?? null });
 }
 
 export async function fetchStatus(): Promise<ProxyStatus> {
@@ -106,4 +106,8 @@ export async function setPollInterval(ms: number): Promise<{ ok: boolean; interv
   return invoke<{ ok: boolean; interval_ms: number; scan_ttl: number }>("set_scan_interval", {
     intervalMs: ms,
   });
+}
+
+export async function setAutoScanEnabled(enabled: boolean): Promise<{ ok: boolean; auto_scan: boolean }> {
+  return invoke<{ ok: boolean; auto_scan: boolean }>("set_auto_scan", { enabled });
 }

@@ -20,12 +20,12 @@ use std::time::{Duration, Instant};
 use std::os::windows::process::CommandExt;
 
 use configstore::ConfigStore;
-use engine::Engine;
+use engine::{Engine, Progress, Snapshot};
 use serde_json::{json, Value};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager,
+    Emitter, Manager,
 };
 
 const PROXY_PORT: u16 = 8787;
@@ -40,8 +40,13 @@ struct ProxyCtl {
 }
 
 struct AppState {
+    /// 扫描引擎（含可变扫描状态），仅后台扫描线程与低频设置命令触碰
     engine: Arc<Mutex<Engine>>,
-    store: ConfigStore,
+    /// 聚合快照读端：get_stats 只 clone Arc，永不与扫描抢 Engine 大锁
+    snap: Arc<Snapshot>,
+    /// 扫描进度读端：独立于 Engine 大锁，扫描期间实时可读
+    progress: Arc<Mutex<Progress>>,
+    store: Arc<ConfigStore>,
     proxy: Mutex<ProxyCtl>,
 }
 
@@ -193,21 +198,28 @@ fn sync_proxy(app: &tauri::AppHandle) {
 // ---- 统计命令（本地引擎，不依赖代理）----
 
 #[tauri::command]
-fn get_stats(state: tauri::State<AppState>) -> Value {
-    // 首屏不自动扫描：用户首次安装打开就是空白状态，自己选择何时全量扫描。
-    // 全量扫描在后台线程持锁运行（可能数十秒）：此处 try_lock，拿不到锁就
-    // 立即返回现有快照，绝不让 UI 线程阻塞在锁上（否则轮询刷新会卡住界面）。
-    let Ok(e) = state.engine.try_lock() else {
-        return serde_json::Value::Null;
-    };
-    e.snapshot()
+async fn get_stats(
+    state: tauri::State<'_, AppState>,
+    prev_gen: Option<u64>,
+) -> Result<Value, String> {
+    let agg = state.snap.get();
+    // gen 未变说明数据没动：回几十字节占位，省掉全量 JSON 的序列化、IPC 传输与前端 parse
+    if prev_gen == Some(agg.gen()) {
+        return Ok(json!({ "gen": agg.gen(), "data": Value::Null }));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok::<Value, String>(json!({ "gen": agg.gen(), "data": agg.to_json() }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 fn force_scan(state: tauri::State<AppState>, force: bool) -> Result<Value, String> {
     let engine = state.engine.clone();
     thread::spawn(move || {
-        let mut e = engine.lock().unwrap();
+        // 已有扫描持锁中则本轮放弃（互斥 + 防抖：连点/轮询不会叠出多轮并发扫描）
+        let Ok(mut e) = engine.try_lock() else { return };
         let _ = e.scan(force);
     });
     Ok(json!({
@@ -217,20 +229,29 @@ fn force_scan(state: tauri::State<AppState>, force: bool) -> Result<Value, Strin
 }
 
 #[tauri::command]
-fn get_scan_progress(state: tauri::State<AppState>) -> Value {
-    let Ok(e) = state.engine.try_lock() else {
-        // 引擎被全量扫描持锁中，返回"running"让前端继续轮询
-        return json!({ "running": true, "total": 0, "scanned": 0, "records": 0, "done": false });
-    };
-    e.progress_snapshot()
+async fn get_scan_progress(state: tauri::State<'_, AppState>) -> Result<Value, String> {
+    // 进度锁独立于 Engine 大锁：扫描期间也能实时读到真实进度，不再返回猜测值
+    let p = *state.progress.lock().unwrap();
+    Ok(json!({
+        "running": p.running,
+        "total": p.total,
+        "scanned": p.scanned,
+        "records": p.records,
+        "done": p.done,
+    }))
 }
 
 #[tauri::command]
-fn set_scan_interval(state: tauri::State<AppState>, interval_ms: u64) -> Result<Value, String> {
+async fn set_scan_interval(state: tauri::State<'_, AppState>, interval_ms: u64) -> Result<Value, String> {
     let ms = interval_ms.clamp(1000, 600_000);
-    let mut e = state.engine.lock().unwrap();
-    e.set_scan_ttl(ms as f64 / 1000.0);
+    state.engine.lock().unwrap().set_scan_ttl(ms as f64 / 1000.0);
     Ok(json!({ "ok": true, "interval_ms": ms, "scan_ttl": ms as f64 / 1000.0 }))
+}
+
+#[tauri::command]
+async fn set_auto_scan(state: tauri::State<'_, AppState>, enabled: bool) -> Result<Value, String> {
+    state.engine.lock().unwrap().set_auto_scan(enabled);
+    Ok(json!({ "ok": true, "auto_scan": enabled }))
 }
 
 // ---- 配置命令（本地文件，代理无关）----
@@ -285,7 +306,7 @@ fn get_ledger(state: tauri::State<AppState>) -> Value {
 // ---- 代理控制命令 ----
 
 #[tauri::command]
-fn proxy_start(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<Value, String> {
+fn proxy_start(app: tauri::AppHandle) -> Result<Value, String> {
     // 后台线程拉起并轮询 health，命令立即返回——避免启动慢时同步阻塞 10s 卡死 UI。
     // 启动结果由前端轮询 get_status（running 字段）感知。
     let app2 = app.clone();
@@ -297,28 +318,37 @@ fn proxy_start(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<V
 }
 
 #[tauri::command]
-fn proxy_stop(state: tauri::State<AppState>) -> Result<Value, String> {
-    shutdown_proxy();
+async fn proxy_stop(state: tauri::State<'_, AppState>) -> Result<Value, String> {
     state.proxy.lock().unwrap().spawned = false;
+    // shutdown 是网络请求，可能等到超时，放阻塞线程池
+    tauri::async_runtime::spawn_blocking(shutdown_proxy)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(json!({ "ok": true, "running": false }))
 }
 
 #[tauri::command]
-fn get_status(state: tauri::State<AppState>) -> Value {
-    let running = proxy_health();
-    let st = if running { proxy_status_raw() } else { json!({}) };
-    let (channels, models) = state.store.counts();
-    json!({
-        "running": running,
-        "needed": state.store.proxy_needed(),
-        "has_key": state.store.has_any_key(),
-        "mode": st.get("mode").and_then(|x| x.as_str()).unwrap_or("service"),
-        "port": PROXY_PORT,
-        "forwarded": st.get("forwarded").and_then(|x| x.as_u64()).unwrap_or(0),
-        "uptime": st.get("uptime").and_then(|x| x.as_u64()).unwrap_or(0),
-        "config_channels": channels,
-        "config_models": models,
+async fn get_status(state: tauri::State<'_, AppState>) -> Result<Value, String> {
+    // 网络探测与磁盘读（health/counts/needed）整体挪进阻塞线程池，不占 UI 主线程
+    let store = state.store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let running = proxy_health();
+        let st = if running { proxy_status_raw() } else { json!({}) };
+        let (channels, models) = store.counts();
+        Ok::<Value, String>(json!({
+            "running": running,
+            "needed": store.proxy_needed(),
+            "has_key": store.has_any_key(),
+            "mode": st.get("mode").and_then(|x| x.as_str()).unwrap_or("service"),
+            "port": PROXY_PORT,
+            "forwarded": st.get("forwarded").and_then(|x| x.as_u64()).unwrap_or(0),
+            "uptime": st.get("uptime").and_then(|x| x.as_u64()).unwrap_or(0),
+            "config_channels": channels,
+            "config_models": models,
+        }))
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -345,14 +375,16 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| PathBuf::from("."));
-            let engine = Arc::new(Mutex::new(Engine::new(dir.clone())));
-            // 启动先锁一次引擎：加载缓存并秒级重建聚合（新装无缓存则首次 get_stats 触发全量扫）
-            {
+            let snap = Arc::new(Snapshot::new());
+            let engine = Arc::new(Mutex::new(Engine::new(dir.clone(), snap.clone())));
+            // 启动先锁一次引擎：加载缓存并秒级重建聚合，结果整体换入快照
+            let progress = {
                 let mut e = engine.lock().unwrap();
                 let n = e.boot();
                 eprintln!("[ENGINE] boot from jsonl cache: {n} records");
-            }
-            let store = ConfigStore::new(dir.clone());
+                e.progress_handle()
+            };
+            let store = Arc::new(ConfigStore::new(dir.clone()));
             // 首次运行复制捆绑的空配置模板（无捆绑则写最小默认）
             let bundled = app
                 .path()
@@ -366,9 +398,28 @@ pub fn run() {
                 });
             store.ensure_default(bundled.as_deref());
             app.manage(AppState {
-                engine,
+                engine: engine.clone(),
+                snap,
+                progress,
                 store,
                 proxy: Mutex::new(ProxyCtl { spawned: false, last_attempt: None }),
+            });
+            // 自动扫描守护线程：auto_scan 开启时按 scan_ttl 周期静默增量扫描。
+            // 扫描独立于 UI 主线程与读路径；扫到新记录才 emit scan-done，前端据此刷新。
+            let daemon = engine.clone();
+            let daemon_app = app.handle().clone();
+            thread::spawn(move || loop {
+                thread::sleep(Duration::from_millis(500));
+                let mut e = match daemon.try_lock() {
+                    Ok(g) => g,
+                    Err(_) => continue, // 上一轮扫描尚未结束，下一 tick 再试
+                };
+                if e.auto_enabled() && e.lazy_scan_needed() {
+                    let n = e.scan(false);
+                    if n > 0 {
+                        let _ = daemon_app.emit("scan-done", json!({ "records": n }));
+                    }
+                }
             });
             // 不再自动拉起代理——首次打开什么都不做，用户需要时手动点"启动代理"
 
@@ -407,6 +458,7 @@ pub fn run() {
             force_scan,
             get_scan_progress,
             set_scan_interval,
+            set_auto_scan,
             get_config,
             put_config,
             key_op,

@@ -4,6 +4,15 @@ export function fmt(n: number): string {
   return String(n);
 }
 
+// 官方积分为小数，按量级控制小数位，避免在窄行里挤爆
+export function fmtCredit(v: unknown): string {
+  const n = Number(v ?? 0);
+  if (!(n > 0)) return "—";
+  if (n >= 100) return String(Math.round(n));
+  if (n >= 10) return n.toFixed(1);
+  return String(Math.round(n * 100) / 100);
+}
+
 // 今天只显示 HH:MM:SS，跨天带 MM-DD
 export function fmtTime(ts: unknown): string {
   const s = String(ts ?? "");

@@ -60,6 +60,27 @@
   border: 1px solid var(--prov-border);
 }
 
+.mini-credit {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: Consolas, "Courier New", monospace;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--credit-text);
+  background: var(--credit-bg);
+  border: 1px solid var(--credit-border);
+  padding: 1px 7px;
+  border-radius: 9px;
+}
+
+.mini-credit-none {
+  color: var(--text-sub);
+  background: transparent;
+  border-color: transparent;
+  opacity: 0.55;
+}
+
 .mini-grid {
   display: grid;
   grid-template-columns: auto auto;

@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Local, TimeZone};
@@ -78,7 +78,7 @@ struct DayAgg {
 }
 
 #[derive(Clone)]
-struct Rec {
+pub(crate) struct Rec {
     ts: String,
     model: String,
     label: String,
@@ -108,7 +108,11 @@ impl Default for Progress {
     }
 }
 
-struct Aggregate {
+/// 聚合结果（不可变快照）。gen 每真正落账 +1：前端拿它判断「数据是否变化」，
+/// 相同则跳过整包 setStats 与重渲染——这是消除 30s 轮询渲染脉冲的关键。
+#[derive(Clone)]
+pub(crate) struct Aggregate {
+    gen: u64,
     total: Tot,
     by_model: Vec<(String, ModelAgg)>, // 保序（首见顺序）
     by_day: BTreeMap<String, DayAgg>,
@@ -117,9 +121,55 @@ struct Aggregate {
     recent: Vec<Rec>,
 }
 
+/// 聚合快照读写端：读路径 clone Arc（纳秒级、永不等待），
+/// 写路径整体换入（全量重建）或 make_mut 就地追加（增量，无读者时零复制）。
+/// 与 Engine 大锁解耦：扫描持 Engine 锁期间，读快照完全不受影响。
+pub(crate) struct Snapshot {
+    inner: Mutex<Arc<Aggregate>>,
+}
+
+impl Snapshot {
+    pub(crate) fn new() -> Self {
+        Snapshot { inner: Mutex::new(Arc::new(Aggregate::new())) }
+    }
+
+    pub(crate) fn get(&self) -> Arc<Aggregate> {
+        self.inner.lock().unwrap().clone()
+    }
+
+    /// 全量重建提交：从零构建的 agg 整体换入，gen 自增（保证前端感知重建）
+    pub(crate) fn replace(&self, agg: Aggregate) {
+        let mut g = self.inner.lock().unwrap();
+        let mut agg = agg;
+        agg.gen = g.gen + 1;
+        *g = Arc::new(agg);
+    }
+
+    /// 增量落账：就地追加。有读者在途时 make_mut 会复制旧快照——旧读者继续读旧数据，
+    /// 写者改新副本，天然双缓冲。有记录落账返回 true（gen 已 +1）。
+    pub(crate) fn apply_delta(&self, recs: Vec<Rec>) -> bool {
+        if recs.is_empty() {
+            return false;
+        }
+        let mut g = self.inner.lock().unwrap();
+        let agg = Arc::make_mut(&mut g);
+        agg.gen += 1;
+        for rec in recs {
+            agg.apply(&rec);
+            agg.push_recent(rec);
+        }
+        true
+    }
+}
+
 impl Aggregate {
+    pub(crate) fn gen(&self) -> u64 {
+        self.gen
+    }
+
     fn new() -> Self {
         Aggregate {
+            gen: 0,
             total: Tot::default(),
             by_model: Vec::new(),
             by_day: BTreeMap::new(),
@@ -354,18 +404,22 @@ fn read_from_offset(path: &Path, offset: u64) -> Option<String> {
 pub struct Engine {
     home: PathBuf,
     cache_dir: PathBuf,
-    agg: Aggregate,
     /// 会话 jsonl 绝对路径 -> 已读字节偏移
     state: HashMap<String, u64>,
     /// (file, callId) 去重；懒加载自缓存
     seen: Option<HashSet<(String, String)>>,
     last_scan: f64,
     scan_ttl: f64,
-    progress: Mutex<Progress>,
+    /// 守护线程是否允许按 ttl 周期自动增量扫描（对应前端「自动扫描」开关）
+    auto: bool,
+    /// 扫描进度独立小锁：扫描期间可被实时读到，不依赖 Engine 大锁
+    progress: Arc<Mutex<Progress>>,
+    /// 聚合结果写端：scan/boot 完成后 commit，读端在 lib.rs 直接 clone 快照
+    snap: Arc<Snapshot>,
 }
 
 impl Engine {
-    pub fn new(data_dir: PathBuf) -> Self {
+    pub(crate) fn new(data_dir: PathBuf, snap: Arc<Snapshot>) -> Self {
         let home = std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
             .map(PathBuf::from)
@@ -375,13 +429,27 @@ impl Engine {
         Engine {
             home,
             cache_dir,
-            agg: Aggregate::new(),
             state: HashMap::new(),
             seen: None,
             last_scan: 0.0,
             scan_ttl: SCAN_TTL,
-            progress: Mutex::new(Progress::default()),
+            auto: false,
+            progress: Arc::new(Mutex::new(Progress::default())),
+            snap,
         }
+    }
+
+    /// 进度锁读端句柄：AppState 持同一 Arc，扫描期间实时可读
+    pub(crate) fn progress_handle(&self) -> Arc<Mutex<Progress>> {
+        self.progress.clone()
+    }
+
+    pub(crate) fn auto_enabled(&self) -> bool {
+        self.auto
+    }
+
+    pub fn set_auto_scan(&mut self, on: bool) {
+        self.auto = on;
     }
 
     fn now() -> f64 {
@@ -523,7 +591,7 @@ impl Engine {
             agg.apply(&rec);
             agg.push_recent(rec);
         }
-        self.agg = agg;
+        self.snap.replace(agg);
         n
     }
 
@@ -644,14 +712,21 @@ impl Engine {
         let n = new_recs.len();
         if n > 0 {
             self.append_recs(&new_recs);
-            for rec in new_recs {
-                self.agg.apply(&rec);
-                self.agg.push_recent(rec);
+            if force {
+                // 全量重建：从本轮解析的全部记录构建完整聚合，整体换入快照
+                self.commit_full(&new_recs);
+            } else {
+                // 增量：就地追加（新记录少，make_mut 毫秒级）
+                self.snap.apply_delta(new_recs);
             }
             self.save_state();
         } else if scanned > 0 {
             self.save_state();
         }
+        // 把本轮学习到的 (file, callId) 全量回写内存去重集，与刚写盘的缓存保持一致。
+        // 否则 force 全量扫描后内存 seen 为空/旧，一旦会话 jsonl 被 compact 重写触发
+        // offset 归零重读，去重失效，同一批历史请求会被重复记账导致统计累加。
+        self.seen = Some(seen);
         self.last_scan = Self::now();
         {
             let mut p = self.progress.lock().unwrap();
@@ -662,6 +737,16 @@ impl Engine {
         n
     }
 
+    /// 全量重建提交：在快照锁外构建完整聚合，完成后整体换入（锁内仅换 Arc，读路径无感知）
+    fn commit_full(&self, recs: &[Rec]) {
+        let mut agg = Aggregate::new();
+        for rec in recs {
+            agg.apply(rec);
+            agg.push_recent(rec.clone());
+        }
+        self.snap.replace(agg);
+    }
+
     pub fn lazy_scan_needed(&self) -> bool {
         Self::now() - self.last_scan > self.scan_ttl
     }
@@ -669,20 +754,23 @@ impl Engine {
     pub fn set_scan_ttl(&mut self, seconds: f64) {
         self.scan_ttl = seconds.max(1.0);
     }
+}
 
-    pub fn snapshot(&self) -> Value {
-        let agg = &self.agg;
+impl Aggregate {
+    /// 序列化为 /stats 契约（total/by_model/by_day/by_model_day/last_success/records），
+    /// 顶层带 gen：前端以此判断数据是否变化，避免整包重渲染。调用方应在阻塞线程池执行。
+    pub(crate) fn to_json(&self) -> Value {
         let total = json!({
-            "prompt_tokens": agg.total.prompt,
-            "completion_tokens": agg.total.completion,
-            "reasoning_tokens": agg.total.reasoning,
-            "cache_read_tokens": agg.total.cache_read,
-            "calls": agg.total.calls,
-            "credits": agg.total.credits,
+            "prompt_tokens": self.total.prompt,
+            "completion_tokens": self.total.completion,
+            "reasoning_tokens": self.total.reasoning,
+            "cache_read_tokens": self.total.cache_read,
+            "calls": self.total.calls,
+            "credits": self.total.credits,
             "cost": 0,
         });
         let mut by_model = serde_json::Map::new();
-        for (name, m) in &agg.by_model {
+        for (name, m) in &self.by_model {
             by_model.insert(
                 name.clone(),
                 json!({
@@ -698,7 +786,7 @@ impl Engine {
                 }),
             );
         }
-        let by_day: Vec<Value> = agg
+        let by_day: Vec<Value> = self
             .by_day
             .iter()
             .map(|(day, d)| {
@@ -712,7 +800,7 @@ impl Engine {
             })
             .collect();
         let mut by_model_day = serde_json::Map::new();
-        for (day, models) in &agg.by_model_day {
+        for (day, models) in &self.by_model_day {
             let mut mm = serde_json::Map::new();
             for (name, d) in models {
                 mm.insert(
@@ -728,12 +816,12 @@ impl Engine {
             }
             by_model_day.insert(day.clone(), Value::Object(mm));
         }
-        let last_success: serde_json::Map<String, Value> = agg
+        let last_success: serde_json::Map<String, Value> = self
             .last_success
             .iter()
             .map(|(k, ts)| (k.clone(), Value::String(ts.clone())))
             .collect();
-        let records: Vec<Value> = agg
+        let records: Vec<Value> = self
             .recent
             .iter()
             .map(|r| {
@@ -752,23 +840,13 @@ impl Engine {
             })
             .collect();
         json!({
+            "gen": self.gen,
             "total": total,
             "by_model": Value::Object(by_model),
             "by_day": by_day,
             "by_model_day": Value::Object(by_model_day),
             "last_success": Value::Object(last_success),
             "records": records,
-        })
-    }
-
-    pub fn progress_snapshot(&self) -> Value {
-        let p = self.progress.lock().unwrap();
-        json!({
-            "running": p.running,
-            "total": p.total,
-            "scanned": p.scanned,
-            "records": p.records,
-            "done": p.done,
         })
     }
 }

@@ -59,6 +59,9 @@ body {
   --prov-bg: linear-gradient(135deg, rgba(79, 209, 255, 0.22), rgba(123, 108, 255, 0.22));
   --prov-text: #8fdcff;
   --prov-border: rgba(120, 170, 255, 0.25);
+  --credit-bg: rgba(255, 196, 107, 0.16);
+  --credit-text: #ffc46b;
+  --credit-border: rgba(255, 196, 107, 0.35);
   --chip-bg: rgba(255, 255, 255, 0.05);
   --chip-border: rgba(255, 255, 255, 0.12);
   --chip-text: #b8bcc9;
@@ -112,6 +115,9 @@ body {
   --prov-bg: linear-gradient(135deg, rgba(15, 134, 201, 0.12), rgba(122, 63, 216, 0.12));
   --prov-text: #0f6ea8;
   --prov-border: rgba(15, 110, 168, 0.3);
+  --credit-bg: rgba(201, 137, 16, 0.12);
+  --credit-text: #a06a00;
+  --credit-border: rgba(201, 137, 16, 0.35);
   --chip-bg: rgba(255, 255, 255, 0.85);
   --chip-border: rgba(70, 100, 190, 0.18);
   --chip-text: #3a4560;
