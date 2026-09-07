@@ -91,7 +91,7 @@ export interface ModelRow {
 export type Mode = "mini" | "expanded";
 export type Theme = "dark" | "light";
 export type CacheScope = "today" | "model";
-export type SettingsTab = "appearance" | "channels" | "models" | "scan" | "config";
+export type SettingsTab = "appearance" | "stats" | "channels" | "models" | "log";
 
 export interface ProxyStatus {
   running: boolean; // 代理进程是否存活（/health 校验过）
