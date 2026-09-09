@@ -1,6 +1,6 @@
 [package]
 name = "token-widget"
-version = "0.2.4"
+version = "0.3.0"
 description = "Token usage widget for WorkBuddy custom models"
 authors = ["you"]
 edition = "2021"
