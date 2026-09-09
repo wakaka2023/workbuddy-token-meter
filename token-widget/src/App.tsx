@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import type {
   CacheScope,
   ChannelCfg,
@@ -17,6 +18,7 @@ import type {
 } from "./types";
 import {
   ACRYLIC_KEY,
+  AUTO_SCAN_KEY,
   CACHE_SCOPE_KEY,
   EXPD_SIZE,
   ICON_CLOSE,
@@ -47,6 +49,7 @@ import {
   triggerScan,
   postKey,
   putConfig,
+  setAutoScanEnabled,
   setPollInterval,
 } from "./api";
 import { Icon } from "./components/Icon";
@@ -84,6 +87,9 @@ function App() {
       return Number.isFinite(n) && n >= 1000 && n <= 600000 ? n : null;
     }),
   );
+  const [autoScan, setAutoScan] = useState<boolean>(() =>
+    loadLS(AUTO_SCAN_KEY, false, (v) => (v === "1" ? true : v === "0" ? false : null)),
+  );
   const [channels, setChannels] = useState<ChannelRow[]>([]);
   const [models, setModels] = useState<ModelRow[]>([]);
   const [saving, setSaving] = useState(false);
@@ -109,32 +115,89 @@ function App() {
     return () => clearInterval(t);
   }, [scanProgress?.running]);
 
+  // 扫描完成（done）后自动刷新统计，让用户看到最新结果
+  useEffect(() => {
+    if (scanProgress?.done) void refreshRef.current();
+  }, [scanProgress?.done]);
+
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  const settingsRef = useRef(showSettings);
+  settingsRef.current = showSettings;
+  // 记住已渲染的数据版本：gen 相同后端只回占位（data=null），跳过整包 setStats 与重渲染
+  const lastGenRef = useRef<number | null>(null);
   const refresh = async () => {
     try {
-      setStats(await fetchStats());
+      const r = await fetchStats(lastGenRef.current);
+      lastGenRef.current = r.gen;
+      if (r.data) setStats(r.data);
       setOnline(true);
-      try {
-        setStatus(await fetchStatus());
-      } catch {
-        /* status 可选 */
+      // get_status 含网络探测与磁盘 IO；mini 模式无状态栏不查，展开/设置页才需要
+      if (modeRef.current === "expanded" || settingsRef.current) {
+        try {
+          setStatus(await fetchStatus());
+        } catch {
+          /* status 可选 */
+        }
       }
     } catch {
       setOnline(false);
     }
   };
+  // setInterval 只建一次，回调经 ref 永远调用最新闭包，避免捕获首帧 mode/state
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
+  // 自动增量扫描：开关打开后，按刷新频率周期性触发增量扫描（默认关，首开保持空白）
+  // 扫描互斥：进度轮询期间不重复触发扫描（后端 force_scan 还有 try_lock 兜底）
+  const scanningRef = useRef(false);
+  scanningRef.current = Boolean(scanProgress?.running);
+
+  const runIncrementalScan = async () => {
+    if (scanningRef.current) return;
+    try {
+      await triggerScan(false);
+      setScanProgress({ running: true, total: 0, scanned: 0, records: 0, done: false });
+    } catch {
+      /* 扫描失败不打断轮询 */
+    }
+  };
 
   useEffect(() => {
-    refresh();
-    const t = setInterval(refresh, pollMs);
+    void refreshRef.current();
+    // 自动增量扫描由后端守护线程按 scan_ttl 静默执行，扫到新记录 emit scan-done 再刷新。
+    // 前端轮询只做一次轻量 get_stats（gen 相同只回占位），不再每轮触发扫描。
+    const t = setInterval(() => void refreshRef.current(), pollMs);
     return () => clearInterval(t);
   }, [pollMs]);
+
+  // 后端守护线程扫到新记录后即时刷新，不必等下一个轮询周期
+  useEffect(() => {
+    const unlisten = listen<{ records: number }>("scan-done", () => void refreshRef.current());
+    return () => {
+      void unlisten.then((u) => u());
+    };
+  }, []);
+
+  // 切到展开模式立即拉一次（含代理状态），避免状态栏空白等到下个轮询周期
+  useEffect(() => {
+    if (mode === "expanded") void refreshRef.current();
+  }, [mode]);
+
+  // 开关同步到后端守护线程（决定是否按周期自动扫描）；打开时立即扫一次，不必等下一个轮询周期
+  useEffect(() => {
+    setAutoScanEnabled(autoScan).catch(() => {});
+    if (autoScan) void runIncrementalScan();
+  }, [autoScan]);
+
+  useEffect(() => saveLS(AUTO_SCAN_KEY, autoScan ? "1" : "0"), [autoScan]);
 
   useEffect(() => saveLS(THEME_KEY, theme), [theme]);
   useEffect(() => saveLS(ACRYLIC_KEY, String(acrylic)), [acrylic]);
   useEffect(() => saveLS(CACHE_SCOPE_KEY, cacheScope), [cacheScope]);
   useEffect(() => saveLS(POLL_KEY, String(pollMs)), [pollMs]);
 
-  // 刷新频率全局统一：把前端设置同步到后端 trace 扫描间隔（后台静默，失败不阻塞）
+  // 刷新频率全局统一：把前端设置同步到后端 jsonl 扫描间隔（后台静默，失败不阻塞）
   useEffect(() => {
     setPollInterval(pollMs).catch(() => {});
   }, [pollMs]);
@@ -204,9 +267,28 @@ function App() {
 
   const handleModeStart = async () => {
     try {
-      const s = await modeStart();
-      setStatus(s);
-      setOpMsg("代理已启动");
+      await modeStart();
+      setOpMsg("启动中，请稍候…");
+      // 轮询 12 秒等待代理就绪，避免一直停留在"启动中"
+      for (let i = 0; i < 12; i++) {
+        await new Promise(r => setTimeout(r, 1000));
+        try {
+          const st = await fetchStatus();
+          if (st.running) {
+            setStatus(st);
+            setOpMsg("代理已启动");
+            return;
+          }
+        } catch { /* 继续轮询 */ }
+      }
+      // 超时后获取最终状态
+      try {
+        const st = await fetchStatus();
+        setStatus(st);
+        setOpMsg(st.running ? "代理已启动" : "代理启动超时，请检查端口 8787 是否被占用");
+      } catch {
+        setOpMsg("代理启动超时，请检查端口 8787 是否被占用");
+      }
     } catch (e) {
       setOpMsg(`启动失败：${e instanceof Error ? e.message : String(e)}`);
     }
@@ -264,6 +346,7 @@ function App() {
     setSaveMsg("");
     try {
       const cfg = await fetchConfig();
+      const hasLocal = Object.keys(cfg.channels ?? {}).length > 0 || Object.keys(cfg.models ?? {}).length > 0;
       setChannels(
         Object.entries(cfg.channels ?? {}).map(([id, ch]) => {
           const raw = ch.proxy ?? "auto";
@@ -296,8 +379,15 @@ function App() {
           };
         }),
       );
-      setRouteModels(await fetchRouteModels());
-      setLedger(await fetchLedger());
+      // 路由模型/台账来自 WorkBuddy 全局 models.json：仅当本地已导入（有渠道/模型）才读取。
+      // 全新安装打开设置面板保持空状态，点「从 workbuddy 导入」后本地有数据才展示。
+      if (hasLocal) {
+        setRouteModels(await fetchRouteModels());
+        setLedger(await fetchLedger());
+      } else {
+        setRouteModels([]);
+        setLedger(null);
+      }
       setStatus(await fetchStatus());
       setSaveMsg("");
     } catch (e) {
@@ -470,6 +560,8 @@ function App() {
             ledger={ledger}
             scanProgress={scanProgress}
             opMsg={opMsg}
+            autoScan={autoScan}
+            setAutoScan={setAutoScan}
             onModeStart={handleModeStart}
             onModeStop={handleModeStop}
             onImport={handleImport}

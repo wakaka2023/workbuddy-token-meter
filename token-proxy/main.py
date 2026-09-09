@@ -1,3 +1,5 @@
+import socket
+import sys
 import threading
 from http.server import ThreadingHTTPServer
 
@@ -8,7 +10,47 @@ from proxy.handler import Handler
 from proxy import trace_cache
 
 
+def _port_in_use():
+    """8787 已被占用则返回 True（本机另一实例或第三方程序）。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", PORT))
+        return False
+    except OSError:
+        return True
+    finally:
+        s.close()
+
+
+def _health_alive():
+    """对端若应答 /health ok 视为「我们的实例已在跑」，与 widget 的判定一致。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(1.0)
+    try:
+        s.connect(("127.0.0.1", PORT))
+        s.sendall(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        data = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        return b'"status": "ok"' in data
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
 def main():
+    # 防多实例堆积：widget 在 sync_proxy 里每次误判「未起来」都会再拉一个进程，
+    # 端口被本实例占用的新进程若继续跑就会越积越多。检测到已有实例直接退出。
+    if _port_in_use():
+        if _health_alive():
+            print(f"token-proxy already running on :{PORT}, exiting")
+            sys.exit(0)
+        print(f"port {PORT} occupied by another process, exiting")
+        sys.exit(1)
     _load_config()
     _init_state()
     threading.Thread(target=_flush_worker, daemon=True).start()
@@ -34,6 +76,8 @@ def main():
     for mid, m in (_config.get("models") or {}).items():
         print(f"  model {mid}: channel={m.get('channel') or '-'} key={m.get('key') or '-'}")
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    server.daemon_threads = True
+    server.allow_reuse_address = True
     server.serve_forever()
 
 

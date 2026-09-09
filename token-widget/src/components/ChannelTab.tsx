@@ -48,7 +48,10 @@ export default function ChannelTab({
         )}
         {channels.map((c, i) => (
           <div className="model-block" key={i}>
-            {/* ① 头部：渠道身份 + 右上角删除 */}
+            <div className="ch-labels">
+              <span>渠道名</span>
+              <span>显示名</span>
+            </div>
             <div className="ch-head">
               <div className="ch-title">
                 <input
@@ -76,7 +79,6 @@ export default function ChannelTab({
                 </button>
               </div>
             </div>
-            {/* ② 连接设置：base + 网络通道 */}
             <div className="s-row">
               <input
                 className="s-input s-base"
@@ -107,7 +109,6 @@ export default function ChannelTab({
                 />
               )}
             </div>
-            {/* ③ Key 池：点击 chip 切换激活 */}
             <div className="key-block">
               <div className="key-head">
                 <span className="key-prov">API Key 池{c.keys.length > 0 ? `（${c.keys.length}）` : ""}</span>
@@ -202,7 +203,6 @@ export default function ChannelTab({
                 </button>
               )}
             </div>
-            {/* ④ 拉取 / 重新拉取模型（同一按钮，可反复获取最新） */}
             <div className="s-row fetch-row">
               <button
                 className="add-btn fetch-btn"

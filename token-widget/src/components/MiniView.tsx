@@ -1,5 +1,6 @@
+import { memo } from "react";
 import type { CacheScope } from "../types";
-import { fmt } from "../utils";
+import { fmt, fmtCredit } from "../utils";
 
 interface Props {
   online: boolean | null;
@@ -11,6 +12,8 @@ interface Props {
 
 function MiniView({ online, lastRec, cacheScope, todayCacheRate, modelTodayCacheRate }: Props) {
   const failed = lastRec ? lastRec.ok === false : false;
+  const credit = Number(lastRec?.credit ?? 0);
+  const hasCredit = credit > 0;
   const rate = cacheScope === "model" ? modelTodayCacheRate : todayCacheRate;
   const rateTip =
     cacheScope === "model"
@@ -33,7 +36,17 @@ function MiniView({ online, lastRec, cacheScope, todayCacheRate, modelTodayCache
             {failed ? (
               <span className="mini-fail-badge">HTTP {String(lastRec.status ?? "?")}</span>
             ) : (
-              <span className="mini-prov">{String(lastRec.label ?? "")}</span>
+              <>
+                <span
+                  className={`mini-credit${hasCredit ? "" : " mini-credit-none"}`}
+                  title={
+                    hasCredit ? "本次请求官方积分消耗" : "该渠道不提供积分数据（仅内置渠道统计）"
+                  }
+                >
+                  ◆ {fmtCredit(credit)}
+                </span>
+                <span className="mini-prov">{String(lastRec.label ?? "")}</span>
+              </>
             )}
           </div>
           {failed ? (
@@ -68,4 +81,4 @@ function MiniView({ online, lastRec, cacheScope, todayCacheRate, modelTodayCache
   );
 }
 
-export default MiniView;
+export default memo(MiniView);

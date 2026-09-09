@@ -12,9 +12,9 @@ import type {
 } from "../types";
 import AppearanceTab from "./AppearanceTab";
 import ChannelTab from "./ChannelTab";
-import ConfigTab from "./ConfigTab";
+import LogTab from "./LogTab";
 import ModelTab from "./ModelTab";
-import ScanTab from "./ScanTab";
+import StatsTab from "./StatsTab";
 
 interface Props {
   theme: Theme;
@@ -45,6 +45,8 @@ interface Props {
   ledger: LedgerData | null;
   scanProgress: ScanProgress | null;
   opMsg: string;
+  autoScan: boolean;
+  setAutoScan: (v: boolean) => void;
   onModeStart: () => void;
   onModeStop: () => void;
   onImport: () => void;
@@ -60,7 +62,7 @@ function SettingsPanel({
   channels, setChannels, models, setModels,
   newKey, setNewKey, saveMsg, setSaveMsg, saving,
   onSave, onClose, onKeyOp, onFetchModels,
-  status, routeModels, ledger, scanProgress, opMsg,
+  status, routeModels, ledger, scanProgress, opMsg, autoScan, setAutoScan,
   onModeStart, onModeStop, onImport, onRouteSwitch, onScan, onRefresh,
 }: Props) {
   return (
@@ -71,6 +73,12 @@ function SettingsPanel({
           onClick={() => setSettingsTab("appearance")}
         >
           外观
+        </button>
+        <button
+          className={`settings-tab${settingsTab === "stats" ? " active" : ""}`}
+          onClick={() => setSettingsTab("stats")}
+        >
+          统计
         </button>
         <button
           className={`settings-tab${settingsTab === "channels" ? " active" : ""}`}
@@ -85,25 +93,29 @@ function SettingsPanel({
           模型
         </button>
         <button
-          className={`settings-tab${settingsTab === "scan" ? " active" : ""}`}
-          onClick={() => setSettingsTab("scan")}
+          className={`settings-tab${settingsTab === "log" ? " active" : ""}`}
+          onClick={() => setSettingsTab("log")}
         >
-          扫描
-        </button>
-        <button
-          className={`settings-tab${settingsTab === "config" ? " active" : ""}`}
-          onClick={() => setSettingsTab("config")}
-        >
-          配置管理
+          日志
         </button>
       </div>
 
-      {settingsTab === "appearance" && (
+      <div className="settings-body">
+        {settingsTab === "appearance" && (
         <AppearanceTab
           theme={theme} setTheme={setTheme}
           acrylic={acrylic} setAcrylic={setAcrylic}
-          cacheScope={cacheScope} setCacheScope={setCacheScope}
+        />
+      )}
+
+      {settingsTab === "stats" && (
+        <StatsTab
           pollMs={pollMs} setPollMs={setPollMs}
+          cacheScope={cacheScope} setCacheScope={setCacheScope}
+          scanProgress={scanProgress}
+          onScan={onScan}
+          autoScan={autoScan}
+          setAutoScan={setAutoScan}
         />
       )}
 
@@ -120,19 +132,14 @@ function SettingsPanel({
         <ModelTab
           channels={channels} models={models} setModels={setModels}
           routeModels={routeModels} onImport={onImport} onRouteSwitch={onRouteSwitch}
+          status={status} onModeStart={onModeStart} onModeStop={onModeStop}
         />
       )}
 
-      {settingsTab === "scan" && (
-        <ScanTab scanProgress={scanProgress} onScan={onScan} />
+      {settingsTab === "log" && (
+        <LogTab ledger={ledger} />
       )}
-
-      {settingsTab === "config" && (
-        <ConfigTab
-          status={status} ledger={ledger}
-          onModeStart={onModeStart} onModeStop={onModeStop}
-        />
-      )}
+      </div>
 
       <div className="s-footer">
         <span className={`save-msg ${saveMsg.startsWith("已保存") ? "ok" : ""}`}>

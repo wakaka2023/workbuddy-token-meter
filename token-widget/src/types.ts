@@ -7,6 +7,8 @@ export interface DayAgg {
 }
 
 export interface ModelAgg {
+  /** 主要显示名（同 mid 取调用最多的名字） */
+  model?: string;
   label: string;
   prompt_tokens: number;
   completion_tokens: number;
@@ -14,15 +16,26 @@ export interface ModelAgg {
   cache_read_tokens: number;
   calls: number;
   cost: number;
+  credits: number; // 官方积分扣费（仅内置渠道，jsonl rawUsage.credit 聚合）
 }
 
 export interface Stats {
+  /** 聚合版本号：仅数据真正变化时 +1，前端据此跳过无变化的整包重渲染 */
+  gen?: number;
   total: Record<string, number>;
-  by_model: Record<string, ModelAgg>;
+  by_model: ModelAgg[];
   by_day: DayAgg[];
+  /** 小时级聚合（键为 YYYY-MM-DD HH），供趋势图近 24 小时视图 */
+  by_hour?: DayAgg[];
   by_model_day?: Record<string, Record<string, DayAgg>>;
   last_success: Record<string, string>;
   records: Array<Record<string, unknown>>;
+}
+
+/** get_stats 响应：gen 未变时 data 为 null，前端保留旧 stats 跳过重渲染 */
+export interface StatsResp {
+  gen: number;
+  data: Stats | null;
 }
 
 export interface KeyCfg {
@@ -80,7 +93,7 @@ export interface ModelRow {
 export type Mode = "mini" | "expanded";
 export type Theme = "dark" | "light";
 export type CacheScope = "today" | "model";
-export type SettingsTab = "appearance" | "channels" | "models" | "scan" | "config";
+export type SettingsTab = "appearance" | "stats" | "channels" | "models" | "log";
 
 export interface ProxyStatus {
   running: boolean; // 代理进程是否存活（/health 校验过）

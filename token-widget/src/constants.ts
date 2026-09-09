@@ -9,6 +9,19 @@ export const EXPD_SIZE = { w: 500, h: 640 };
 export const THEME_KEY = "tw-theme";
 export const ACRYLIC_KEY = "tw-acrylic";
 export const CACHE_SCOPE_KEY = "tw-cache-scope";
+// 自动增量扫描开关：默认关（首次打开保持空白轻量，用户自己决定是否开启）
+export const AUTO_SCAN_KEY = "tw-auto-scan";
+// 展开模式：趋势图时间范围与最近请求条数
+export const TREND_RANGE_KEY = "tw-trend-range";
+export const RECENT_LIMIT_KEY = "tw-recent-limit";
+export type TrendRangeKey = "h24" | "d7" | "d30" | "all";
+export const TREND_RANGES: { label: string; key: TrendRangeKey }[] = [
+  { label: "近 24 小时", key: "h24" },
+  { label: "近 7 天", key: "d7" },
+  { label: "近 1 个月", key: "d30" },
+  { label: "全部", key: "all" },
+];
+export const RECENT_LIMITS = [5, 10, 20, 50] as const;
 
 // 深/浅主题各自的基础 RGB（亚克力滑块插值透明度）
 export const THEME_BG_RGB: Record<Theme, [string, string]> = {

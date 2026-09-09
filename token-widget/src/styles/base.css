@@ -1,12 +1,10 @@
-/* widget 容器：亚克力（半透明磨砂）材质 */
+/* widget 容器：渐变背景 + 圆角（轻量，不启用 GPU 昂贵的 backdrop-filter） */
 .widget {
   position: relative;
   height: 100vh;
   display: flex;
   flex-direction: column;
   background: linear-gradient(168deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
-  backdrop-filter: blur(30px) saturate(160%);
-  -webkit-backdrop-filter: blur(30px) saturate(160%);
   border: 1px solid var(--border-color);
   border-radius: 14px;
   color: var(--text-main);
@@ -26,16 +24,14 @@
     0 0 14px rgba(229, 72, 77, 0.35);
 }
 
-/* 亚克力噪点纹理 + 顶部高光（磨砂颗粒感） */
+/* 前景装饰层（轻量高光，不启用 SVG 噪声） */
 .widget::before {
   content: "";
   position: absolute;
   inset: 0;
   border-radius: inherit;
   pointer-events: none;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='140' height='140' filter='url(%23n)' opacity='0.05'/></svg>");
-  background-size: 140px 140px;
-  opacity: 0.55;
+  opacity: 0;
 }
 
 .widget::after {

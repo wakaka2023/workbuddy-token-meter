@@ -12,6 +12,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cost calculation with a multi-source price library
 - Sub-agent (expert team) token aggregation from `subagents/*.jsonl`
 
+## [0.3.0] - 2026-09-09
+
+### Added
+
+- Mini window shows per-request credit consumption.
+- Expanded view: trend chart range selector (24h / 7d / 30d / all) and recent-request limit.
+- Settings: new **Stats** and **Log** tabs.
+
+### Changed
+
+- **Stats source switched to WorkBuddy session JSONL** (`~/.workbuddy/projects/**/*.jsonl`),
+  replacing the trace-based pipeline.
+- Settings reorganized into five tabs (Appearance / Stats / Channels / Models / Log).
+- Model table splits rows by (model, channel), each channel counted independently.
+- Channel attribution derived from `models.json` timeline snapshots instead of model display names.
+
+### Fixed
+
+- Full scan no longer double-counts already scanned records.
+- No more UI stutter while polling: aggregation moved to an immutable snapshot with generation-based skipping.
+- Model table: display names no longer leak across channels, and built-in case variants
+  (e.g. `Deepseek-V4-Flash` / `deepseek-v4-flash`) merge into one row.
+- Trend chart fills missing hours/days with zeroes instead of leaving gaps.
+- Quitting hides the window immediately instead of waiting for the proxy handshake.
+
 ## [0.2.4] - 2026-09-02
 
 ### Changed
