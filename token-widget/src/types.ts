@@ -7,6 +7,8 @@ export interface DayAgg {
 }
 
 export interface ModelAgg {
+  /** 主要显示名（同 mid 取调用最多的名字） */
+  model?: string;
   label: string;
   prompt_tokens: number;
   completion_tokens: number;
@@ -21,7 +23,7 @@ export interface Stats {
   /** 聚合版本号：仅数据真正变化时 +1，前端据此跳过无变化的整包重渲染 */
   gen?: number;
   total: Record<string, number>;
-  by_model: Record<string, ModelAgg>;
+  by_model: ModelAgg[];
   by_day: DayAgg[];
   /** 小时级聚合（键为 YYYY-MM-DD HH），供趋势图近 24 小时视图 */
   by_hour?: DayAgg[];

@@ -40,9 +40,7 @@ function ExpandedView({ stats }: Props) {
   const calls = total?.calls ?? 0;
 
   const modelsStat = stats
-    ? Object.entries(stats.by_model)
-        .map(([id, m]) => ({ id, ...m }))
-        .sort((a, b) => b.calls - a.calls)
+    ? [...(stats.by_model ?? [])].sort((a, b) => b.calls - a.calls)
     : [];
 
   const recent = stats ? [...stats.records].reverse().slice(0, recentLimit) : [];
@@ -232,8 +230,8 @@ function ExpandedView({ stats }: Props) {
             </thead>
             <tbody>
               {modelsStat.map((m) => (
-                <tr key={m.id}>
-                  <td className="mono">{m.id}</td>
+                <tr key={`${m.model}-${m.label}`}>
+                  <td className="mono">{m.model}</td>
                   <td>
                     <span className="prov-chip">{m.label}</span>
                   </td>

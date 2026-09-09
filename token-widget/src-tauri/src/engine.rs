@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{Local, TimeZone};
+use chrono::{Local, NaiveDateTime, TimeZone};
 use serde_json::{json, Value};
 
 const RECENT_KEEP: usize = 200;
@@ -59,14 +59,22 @@ struct Tot {
 }
 
 #[derive(Default, Clone)]
-struct ModelAgg {
-    label: String,
+struct LabelAgg {
     prompt: i64,
     completion: i64,
     reasoning: i64,
     cache_read: i64,
     calls: i64,
     credits: f64,
+    /// 该渠道下各显示名出现次数：换过显示名时取本渠道内调用最多的名字，
+    /// 避免跨渠道串名（如 B.AI 时期的名字被套到 SENSENOVA 行上）
+    names: HashMap<String, u32>,
+}
+
+#[derive(Default, Clone)]
+struct ModelAgg {
+    /// 渠道 -> 独立统计：同一模型多渠道时按渠道拆行展示
+    by_label: HashMap<String, LabelAgg>,
 }
 
 #[derive(Default, Clone)]
@@ -96,6 +104,8 @@ pub(crate) struct Rec {
     call_ts: i64,
     file: String,
     call_id: String,
+    /// requestModelId（去重记账用同一记录，历史缓存无此字段为空串）
+    mid: String,
     req_id: String,
 }
 
@@ -196,28 +206,35 @@ impl Aggregate {
         t.cache_read += r.cache_read;
         t.credits += r.credit;
         t.calls += 1;
-        match self.by_model.iter_mut().find(|(k, _)| k == &r.model) {
+        // 统一按 mid 归组：内置大小写变体（Deepseek-V4-Flash / deepseek-v4-flash）共享同一 mid
+        // 应合并到一行；mid 缺失时（早期历史记录）回退到 model 字符串。
+        let group = if r.mid.is_empty() { &r.model } else { &r.mid };
+        match self.by_model.iter_mut().find(|(k, _)| k == group) {
             Some((_, m)) => {
-                m.prompt += r.prompt;
-                m.completion += r.completion;
-                m.reasoning += r.reasoning;
-                m.cache_read += r.cache_read;
-                m.credits += r.credit;
-                m.calls += 1;
+                let la = m.by_label.entry(r.label.clone()).or_default();
+                *la.names.entry(r.model.clone()).or_insert(0) += 1;
+                la.prompt += r.prompt;
+                la.completion += r.completion;
+                la.reasoning += r.reasoning;
+                la.cache_read += r.cache_read;
+                la.credits += r.credit;
+                la.calls += 1;
             }
             None => {
-                self.by_model.push((
-                    r.model.clone(),
-                    ModelAgg {
-                        label: r.label.clone(),
-                        prompt: r.prompt,
-                        completion: r.completion,
-                        reasoning: r.reasoning,
-                        cache_read: r.cache_read,
-                        credits: r.credit,
-                        calls: 1,
-                    },
-                ));
+                let mut names = HashMap::new();
+                names.insert(r.model.clone(), 1u32);
+                let la = LabelAgg {
+                    prompt: r.prompt,
+                    completion: r.completion,
+                    reasoning: r.reasoning,
+                    cache_read: r.cache_read,
+                    credits: r.credit,
+                    calls: 1,
+                    names,
+                };
+                let mut by_label = HashMap::new();
+                by_label.insert(r.label.clone(), la);
+                self.by_model.push((group.clone(), ModelAgg { by_label }));
             }
         }
         if r.ts.len() >= 10 {
@@ -286,28 +303,286 @@ fn provider_from_url(url: &str) -> String {
     }
 }
 
-/// 读 models.json -> {自定义名/id: provider label}。不可读/异常返回空映射。
-fn load_model_index(models_json: &Path) -> HashMap<String, String> {
-    let mut idx = HashMap::new();
-    let Ok(content) = fs::read_to_string(models_json) else { return idx };
-    let Ok(v) = serde_json::from_str::<Value>(&content) else { return idx };
-    let Some(arr) = v.as_array() else { return idx };
-    for m in arr {
-        let name = m.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-        let mid = m.get("id").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-        let url = m.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        if name.is_empty() && mid.is_empty() {
-            continue;
-        }
-        let provider = provider_from_url(&url);
-        if !name.is_empty() {
-            idx.entry(name).or_insert(provider.clone());
-        }
-        if !mid.is_empty() {
-            idx.entry(mid).or_insert(provider);
-        }
+// ---- 渠道解析：多源配置还原「请求发生时模型被路由到的上游」 ----
+//
+// 请求 jsonl 本身不带渠道字段（无 url），渠道只能从配置还原。信号分层：
+//   L1 路由时间线（~/.workbuddy/models.json 及其 .bak-* 备份）：
+//      每份备份是某个时刻的完整路由快照，按时间排序成时间窗；
+//      请求 ts 落在哪个窗就按哪个快照的 url 识别——直连/换渠道/改名都能还原。
+//   L2 当前显式配置（数据目录 config.json + config-ledger.json）：
+//      models[id].channel -> channels[ch].base；ledger 的 name -> current_url 供显示名反查。
+//   L3 旧代理路由（token-proxy/config.json：models[id].provider -> providers[pid].base）：
+//      覆盖走本地代理期（models.json 的 url 是 127.0.0.1 时，真实上游在代理侧）。
+// 显示名只作为配置文件里的反查键，绝不参与渠道判定；全查不到保持"自定义"。
+
+struct RouteSnap {
+    /// 该快照生效起始毫秒时间戳（请求 ts >= start 且 < 下一窗时使用）
+    start: i64,
+    by_id: HashMap<String, String>,
+    /// 显示名 -> (url, model_id)，供历史缓存（无 model_id）反查
+    by_name: HashMap<String, (String, String)>,
+}
+
+pub(crate) struct ChannelResolver {
+    timeline: Vec<RouteSnap>,
+    proxy: HashMap<String, String>,
+    /// mid -> 渠道切换点（ms）：ts >= switch 用当前快照，否则用旧时间线。
+    /// 由 compute_switch 从缓存记录反推：当前配置名首现 / 旧快照名最后出现。
+    switch: HashMap<String, i64>,
+}
+
+fn is_loopback(url: &str) -> bool {
+    let host = url
+        .split("://")
+        .nth(1)
+        .unwrap_or("")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+/// 渠道名取自上游 host；loopback/空视为无渠道信息
+fn upstream_channel(url: &str) -> Option<String> {
+    if is_loopback(url) {
+        return None;
     }
-    idx
+    let p = provider_from_url(url);
+    if p.is_empty() || p == "自定义" {
+        None
+    } else {
+        Some(p)
+    }
+}
+
+fn parse_clock(ts: &str, fmt: &str) -> Option<i64> {
+    NaiveDateTime::parse_from_str(ts, fmt)
+        .ok()
+        .and_then(|d| d.and_local_timezone(Local).single())
+        .map(|dt| dt.timestamp_millis())
+}
+
+fn parse_bak_ts(name: &str) -> Option<i64> {
+    let rest = name.strip_prefix("models.json.bak-")?;
+    parse_clock(rest, "%Y%m%d-%H%M%S")
+}
+
+impl ChannelResolver {
+    pub(crate) fn build(home: &Path) -> Self {
+        let mut timeline: Vec<RouteSnap> = Vec::new();
+        if let Ok(rd) = fs::read_dir(home.join(".workbuddy")) {
+            let mut snaps: Vec<(i64, PathBuf)> = Vec::new();
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let t = if name == "models.json" {
+                    e.metadata()
+                        .and_then(|m| m.modified())
+                        .map(|m| m.duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0))
+                        .unwrap_or(i64::MAX)
+                } else if let Some(t) = parse_bak_ts(&name) {
+                    t
+                } else {
+                    continue;
+                };
+                snaps.push((t, e.path()));
+            }
+            snaps.sort_by_key(|(t, _)| *t);
+            for (start, p) in snaps {
+                let mut snap = RouteSnap { start, by_id: HashMap::new(), by_name: HashMap::new() };
+                let Ok(content) = fs::read_to_string(&p) else { continue };
+                let Ok(v) = serde_json::from_str::<Value>(&content) else { continue };
+                let Some(arr) = v.as_array() else { continue };
+                for m in arr {
+                    let name = m.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                    let mid = m.get("id").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                    let url = m.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    if url.is_empty() {
+                        continue;
+                    }
+                    if !mid.is_empty() {
+                        snap.by_id.insert(mid.clone(), url.clone());
+                    }
+                    if !name.is_empty() {
+                        snap.by_name.insert(name, (url, mid));
+                    }
+                }
+                timeline.push(snap);
+            }
+        }
+
+        let mut proxy = HashMap::new();
+        if let Ok(content) =
+            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../token-proxy/config.json"))
+        {
+            if let Ok(v) = serde_json::from_str::<Value>(&content) {
+                let providers = v.get("providers").and_then(|x| x.as_object());
+                if let Some(models) = v.get("models").and_then(|x| x.as_object()) {
+                    for (mid, m) in models {
+                        let Some(pid) = m.get("provider").and_then(|x| x.as_str()) else { continue };
+                        let base = providers
+                            .and_then(|p| p.get(pid))
+                            .and_then(|p| p.get("base"))
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("");
+                        if !base.is_empty() {
+                            proxy.insert(mid.clone(), base.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        ChannelResolver { timeline, proxy, switch: HashMap::new() }
+    }
+
+    /// 快照内按 mid 解析渠道：真实上游直接取；loopback（走本地代理）用代理路由表还原
+    fn chan_from_snap(&self, snap: &RouteSnap, mid: &str) -> Option<String> {
+        let url = snap.by_id.get(mid)?;
+        if let Some(ch) = upstream_channel(url) {
+            return Some(ch);
+        }
+        if let Some(purl) = self.proxy.get(mid) {
+            if let Some(ch) = upstream_channel(purl) {
+                return Some(ch);
+            }
+        }
+        None
+    }
+
+    fn snap_at(&self, ts: i64) -> Option<&RouteSnap> {
+        self.timeline.iter().rev().find(|s| s.start <= ts)
+    }
+
+    /// 按 model_id（自动去 custom-local: 前缀）解析渠道；失败返回 None。
+    /// 解析顺序：ts >= 该 mid 切换点 → 当前快照；否则 → 旧时间线（最早备份前伸）；
+    /// 旧快照走代理但代理路由缺失 → 当前快照兜底；均失败 → 代理路由表兜底。
+    pub(crate) fn resolve(&self, model_id: &str, ts: i64) -> Option<String> {
+        let mid = model_id.strip_prefix("custom-local:").unwrap_or(model_id);
+        if let Some(&sw) = self.switch.get(mid) {
+            if ts >= sw {
+                if let Some(snap) = self.timeline.last() {
+                    if let Some(ch) = self.chan_from_snap(snap, mid) {
+                        return Some(ch);
+                    }
+                }
+            }
+        }
+        let has_baks = self.timeline.len() >= 2;
+        if has_baks {
+            let (baks, cur) = self.timeline.split_at(self.timeline.len() - 1);
+            let snap = baks.iter().rev().find(|s| s.start <= ts).or_else(|| baks.first());
+            if let Some(snap) = snap {
+                if let Some(ch) = self.chan_from_snap(snap, mid) {
+                    return Some(ch);
+                }
+                // 备份内容在备份前已生效（最早备份前伸）；代理 config 缺失该 mid 路由时用当前配置兜底
+                if let Some(ch) = self.chan_from_snap(&cur[0], mid) {
+                    return Some(ch);
+                }
+                return None;
+            }
+        }
+        if let Some(purl) = self.proxy.get(mid) {
+            if let Some(ch) = upstream_channel(purl) {
+                return Some(ch);
+            }
+        }
+        None
+    }
+
+    /// 按显示名反查（历史缓存无 model_id 时）；仅沿时间线精确匹配，
+    /// 不查当前态配置——避免把现在的渠道套到历史记录上。
+    /// 用户可能给显示名附加括号后缀（如 "GLM-5.3-Flash(B.AI测试)"），
+    /// 精确匹配失败时剥离末尾括号段再次匹配配置 name（括号内容不参与判断）。
+    pub(crate) fn resolve_by_name(&self, name: &str, ts: i64) -> Option<String> {
+        let stripped = name.rfind('(').map(|i| name[..i].trim().to_string());
+        let candidates: Vec<&str> = match &stripped {
+            Some(s) if s != name => vec![name, s],
+            _ => vec![name],
+        };
+        for cand in candidates {
+            if let Some(snap) = self.snap_at(ts) {
+                if let Some((url, mid)) = snap.by_name.get(cand) {
+                    if let Some(ch) = upstream_channel(url) {
+                        return Some(ch);
+                    }
+                    if let Some(purl) = self.proxy.get(mid) {
+                        if let Some(ch) = upstream_channel(purl) {
+                            return Some(ch);
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
+    /// 从缓存记录反推渠道切换点：switch[mid] = max(当前配置名首现 ts, 旧快照名最后出现 ts)，
+    /// 无切换信号（新模型/全程同名）用当前快照起点（mtime）兜底。
+    pub(crate) fn compute_switch<I>(&mut self, rows: I)
+    where
+        I: Iterator<Item = (String, String, i64)>,
+    {
+        let Some(cur) = self.timeline.last() else { return };
+        let mtime = cur.start;
+        let mut mid_to_name: HashMap<String, String> = HashMap::new();
+        for (nm, (_, mid)) in &cur.by_name {
+            if !mid.is_empty() {
+                mid_to_name.entry(mid.clone()).or_insert_with(|| nm.clone());
+            }
+        }
+        let mut old_mid_to_name: HashMap<String, String> = HashMap::new();
+        if self.timeline.len() >= 2 {
+            let last_bak = &self.timeline[self.timeline.len() - 2];
+            for (nm, (_, mid)) in &last_bak.by_name {
+                if !mid.is_empty() {
+                    old_mid_to_name.entry(mid.clone()).or_insert_with(|| nm.clone());
+                }
+            }
+        }
+        let mut first_ts: HashMap<String, i64> = HashMap::new();
+        let mut last_ts: HashMap<String, i64> = HashMap::new();
+        for (mid, nm, ts) in rows {
+            let mid = mid.strip_prefix("custom-local:").unwrap_or(&mid).to_string();
+            if let Some(cur_name) = mid_to_name.get(&mid) {
+                if &nm == cur_name {
+                    let e = first_ts.entry(mid.clone()).or_insert(ts);
+                    if ts < *e {
+                        *e = ts;
+                    }
+                }
+            }
+            if let Some(old_name) = old_mid_to_name.get(&mid) {
+                if &nm == old_name {
+                    let e = last_ts.entry(mid.clone()).or_insert(ts);
+                    if ts > *e {
+                        *e = ts;
+                    }
+                }
+            }
+        }
+        let mut switch = HashMap::new();
+        for (mid, cur_name) in mid_to_name {
+            let a = first_ts.get(&mid).copied();
+            let b = if old_mid_to_name.get(&mid) != Some(&cur_name) {
+                last_ts.get(&mid).copied()
+            } else {
+                None
+            };
+            let base = match (a, b) {
+                (Some(x), Some(y)) => x.max(y),
+                (Some(x), None) => x,
+                (None, Some(y)) => y,
+                (None, None) => mtime,
+            };
+            switch.insert(mid, base.min(mtime));
+        }
+        self.switch = switch;
+    }
 }
 
 // ---- 会话 jsonl 解析 ----
@@ -346,7 +621,7 @@ fn sum_details(v: Option<&Value>, key: &str) -> i64 {
 /// 此时以真实模型为聚合键、档位名进 label，与桌面端展示一致。
 /// rawUsage.credit 为官方积分扣费（仅内置渠道有，自定义渠道无此字段记 0）。
 /// usage 两个主字段都 0 视为无用量跳过；无 callId 无法与 result 配对，也跳过。
-fn rec_from_call(v: &Value, file: &str, custom: &HashMap<String, String>) -> Option<Rec> {
+fn rec_from_call(v: &Value, file: &str, res: &ChannelResolver) -> Option<Rec> {
     let pd = v.get("providerData")?;
     let usage = pd.get("usage")?;
     if !usage.is_object() {
@@ -362,6 +637,7 @@ fn rec_from_call(v: &Value, file: &str, custom: &HashMap<String, String>) -> Opt
         return None;
     }
     let model_id = pd.get("requestModelId").and_then(|x| x.as_str()).unwrap_or("");
+    let call_ts = v.get("timestamp").and_then(|x| x.as_i64()).unwrap_or(0);
     let is_custom = model_id.starts_with("custom-local:");
     let is_tier = matches!(model_id, "fast-model" | "balanced-model" | "deep-model");
     let backend_model = pd.get("model").and_then(|x| x.as_str()).unwrap_or("").trim();
@@ -377,7 +653,7 @@ fn rec_from_call(v: &Value, file: &str, custom: &HashMap<String, String>) -> Opt
         return None;
     }
     let label = if is_custom {
-        custom.get(&model).cloned().unwrap_or_else(|| "自定义".into())
+        res.resolve(model_id, call_ts).unwrap_or_else(|| "自定义".into())
     } else {
         match model_id {
             "fast-model" => "内置·快速",
@@ -399,9 +675,10 @@ fn rec_from_call(v: &Value, file: &str, custom: &HashMap<String, String>) -> Opt
         ok: true,
         duration_ms: 0,
         error: String::new(),
-        call_ts: v.get("timestamp").and_then(|x| x.as_i64()).unwrap_or(0),
+        call_ts,
         file: file.to_string(),
         call_id,
+        mid: model_id.to_string(),
         req_id: pd
             .get("conversationRequestId")
             .and_then(|x| x.as_str())
@@ -436,6 +713,8 @@ pub struct Engine {
     progress: Arc<Mutex<Progress>>,
     /// 聚合结果写端：scan/boot 完成后 commit，读端在 lib.rs 直接 clone 快照
     snap: Arc<Snapshot>,
+    /// 渠道切换点（mid -> ms），rebuild 时反推，scan 复用
+    switch_ts: HashMap<String, i64>,
 }
 
 impl Engine {
@@ -456,6 +735,7 @@ impl Engine {
             auto: false,
             progress: Arc::new(Mutex::new(Progress::default())),
             snap,
+            switch_ts: HashMap::new(),
         }
     }
 
@@ -474,10 +754,6 @@ impl Engine {
 
     fn now() -> f64 {
         SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
-    }
-
-    fn models_json(&self) -> PathBuf {
-        self.home.join(".workbuddy").join("models.json")
     }
 
     fn cache_files(&self) -> Vec<PathBuf> {
@@ -557,7 +833,7 @@ impl Engine {
                     "reasoning_tokens": r.reasoning, "cache_read_tokens": r.cache_read,
                     "credit": r.credit, "ok": r.ok,
                     "duration_ms": r.duration_ms, "error": r.error,
-                    "file": r.file, "callId": r.call_id, "reqId": r.req_id,
+                    "file": r.file, "callId": r.call_id, "mid": r.mid, "reqId": r.req_id,
                 });
                 out.push_str(&serde_json::to_string(&rec).unwrap());
                 out.push('\n');
@@ -580,7 +856,9 @@ impl Engine {
 
     /// 从按天缓存重建聚合，重启秒级。返回记录数。
     pub fn rebuild_from_cache(&mut self) -> usize {
-        let mut all: Vec<Rec> = Vec::new();
+        let mut res = ChannelResolver::build(&self.home);
+        let mut rows: Vec<(String, String, i64)> = Vec::new();
+        let mut raw: Vec<(Value, String, String, String, String, i64)> = Vec::new();
         for fp in self.cache_files() {
             let Ok(content) = fs::read_to_string(&fp) else { continue };
             for line in content.lines() {
@@ -589,24 +867,49 @@ impl Engine {
                 if ts.is_empty() {
                     continue;
                 }
-                all.push(Rec {
-                    ts,
-                    model: v.get("model").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
-                    label: v.get("label").and_then(|x| x.as_str()).unwrap_or("内置").to_string(),
-                    prompt: num(&v, "prompt_tokens"),
-                    completion: num(&v, "completion_tokens"),
-                    reasoning: num(&v, "reasoning_tokens"),
-                    cache_read: num(&v, "cache_read_tokens"),
-                    credit: fnum(&v, "credit"),
-                    ok: v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true),
-                    duration_ms: v.get("duration_ms").and_then(|x| x.as_i64()).unwrap_or(0),
-                    error: v.get("error").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                    call_ts: 0,
-                    file: v.get("file").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                    call_id: v.get("callId").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                    req_id: v.get("reqId").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                });
+                let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("?").to_string();
+                let mid = v.get("mid").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let old_label = v.get("label").and_then(|x| x.as_str()).unwrap_or("内置").to_string();
+                let ts_ms = parse_clock(&ts, "%Y-%m-%d %H:%M:%S").unwrap_or(0);
+                rows.push((mid.clone(), model.clone(), ts_ms));
+                raw.push((v, ts, model, mid, old_label, ts_ms));
             }
+        }
+        res.compute_switch(rows.into_iter());
+        self.switch_ts = res.switch.clone();
+        let mut all: Vec<Rec> = Vec::new();
+        for (v, ts, model, mid, old_label, ts_ms) in raw {
+            // 历史缓存无 mid（旧格式）：仅当原 label 是"自定义"时尝试按显示名反查修正；
+            // 有 mid 的自定义模型统一走解析管道，失败归"自定义"（不保留可能被污染的旧 label）
+            let label = if !mid.is_empty() {
+                if mid.starts_with("custom-local:") {
+                    res.resolve(&mid, ts_ms).unwrap_or_else(|| "自定义".into())
+                } else {
+                    old_label
+                }
+            } else if old_label == "自定义" {
+                res.resolve_by_name(&model, ts_ms).unwrap_or(old_label)
+            } else {
+                old_label
+            };
+            all.push(Rec {
+                ts,
+                model,
+                label,
+                prompt: num(&v, "prompt_tokens"),
+                completion: num(&v, "completion_tokens"),
+                reasoning: num(&v, "reasoning_tokens"),
+                cache_read: num(&v, "cache_read_tokens"),
+                credit: fnum(&v, "credit"),
+                ok: v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true),
+                duration_ms: v.get("duration_ms").and_then(|x| x.as_i64()).unwrap_or(0),
+                error: v.get("error").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                call_ts: ts_ms,
+                file: v.get("file").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                call_id: v.get("callId").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                mid,
+                req_id: v.get("reqId").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            });
         }
         all.sort_by(|a, b| a.ts.cmp(&b.ts));
         let n = all.len();
@@ -662,7 +965,13 @@ impl Engine {
         if force {
             self.clear_cache();
         }
-        let custom = load_model_index(&self.models_json());
+        let mut res = ChannelResolver::build(&self.home);
+        if self.switch_ts.is_empty() {
+            // 无缓存重建过（首装/异常）：当前快照的 mid 都视为从当前时刻起用当前渠道
+            res.compute_switch(std::iter::empty());
+        } else {
+            res.switch = self.switch_ts.clone();
+        }
         let paths = self.collect_session_files();
         {
             let mut p = self.progress.lock().unwrap();
@@ -706,7 +1015,7 @@ impl Engine {
                         if seen.contains(&key) {
                             continue;
                         }
-                        let Some(rec) = rec_from_call(&v, &path_key, &custom) else { continue };
+                        let Some(rec) = rec_from_call(&v, &path_key, &res) else { continue };
                         seen.insert(key.clone());
                         pending.insert(key, rec);
                     }
@@ -811,22 +1120,29 @@ impl Aggregate {
             "credits": self.total.credits,
             "cost": 0,
         });
-        let mut by_model = serde_json::Map::new();
+        let mut by_model: Vec<Value> = Vec::new();
         for (name, m) in &self.by_model {
-            by_model.insert(
-                name.clone(),
-                json!({
-                    "model": name,
-                    "label": m.label,
-                    "prompt_tokens": m.prompt,
-                    "completion_tokens": m.completion,
-                    "reasoning_tokens": m.reasoning,
-                    "cache_read_tokens": m.cache_read,
-                    "calls": m.calls,
-                    "credits": m.credits,
+            let mut labels: Vec<(&String, &LabelAgg)> = m.by_label.iter().collect();
+            labels.sort_by(|a, b| b.1.calls.cmp(&a.1.calls));
+            for (label, la) in labels {
+                let display = la
+                    .names
+                    .iter()
+                    .max_by_key(|(_, c)| **c)
+                    .map(|(n, _)| n.clone())
+                    .unwrap_or_else(|| name.clone());
+                by_model.push(json!({
+                    "model": display,
+                    "label": label,
+                    "prompt_tokens": la.prompt,
+                    "completion_tokens": la.completion,
+                    "reasoning_tokens": la.reasoning,
+                    "cache_read_tokens": la.cache_read,
+                    "calls": la.calls,
+                    "credits": la.credits,
                     "cost": 0,
-                }),
-            );
+                }));
+            }
         }
         let by_day: Vec<Value> = self
             .by_day
@@ -902,7 +1218,7 @@ impl Aggregate {
         json!({
             "gen": self.gen,
             "total": total,
-            "by_model": Value::Object(by_model),
+            "by_model": by_model,
             "by_day": by_day,
             "by_hour": by_hour,
             "by_model_day": Value::Object(by_model_day),

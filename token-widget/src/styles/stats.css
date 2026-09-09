@@ -160,6 +160,13 @@
   white-space: nowrap;
 }
 
+.prov-more {
+  margin-left: 4px;
+  font-size: 9px;
+  color: var(--text-sub);
+  white-space: nowrap;
+}
+
 .num {
   text-align: right;
   font-variant-numeric: tabular-nums;

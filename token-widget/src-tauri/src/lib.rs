@@ -93,9 +93,19 @@ fn proxy_exe(app: &tauri::AppHandle) -> Option<PathBuf> {
 // ---- 极简 HTTP 客户端（仅本机回环，读 Content-Length）----
 
 fn http_req(port: u16, method: &str, path: &str, body: &[u8]) -> Result<Value, String> {
+    http_req_timeout(port, method, path, body, Duration::from_millis(2000))
+}
+
+fn http_req_timeout(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    timeout: Duration,
+) -> Result<Value, String> {
     let mut s = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
-    s.set_read_timeout(Some(Duration::from_millis(2000))).ok();
-    s.set_write_timeout(Some(Duration::from_millis(2000))).ok();
+    s.set_read_timeout(Some(timeout)).ok();
+    s.set_write_timeout(Some(timeout)).ok();
     let mut req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
     if body.is_empty() {
         req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
@@ -126,11 +136,22 @@ fn proxy_status_raw() -> Value {
     http_req(PROXY_PORT, "GET", "/status", &[]).unwrap_or_else(|_| json!({}))
 }
 
+/// 退出路径专用短超时：关代理不该让窗口多停几秒等回包
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(300);
+/// quit_app 与 RunEvent::Exit 都会调 shutdown_proxy，用它保证只真正执行一次
+static PROXY_SHUTDOWN_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn shutdown_proxy() {
-    if !proxy_health() {
+    if PROXY_SHUTDOWN_DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    let _ = http_req(PROXY_PORT, "POST", "/shutdown", &[]);
+    if !matches!(
+        http_req_timeout(PROXY_PORT, "GET", "/health", &[], SHUTDOWN_TIMEOUT),
+        Ok(v) if v.get("status").and_then(|x| x.as_str()) == Some("ok")
+    ) {
+        return;
+    }
+    let _ = http_req_timeout(PROXY_PORT, "POST", "/shutdown", &[], SHUTDOWN_TIMEOUT);
 }
 
 /// 拉起代理进程并轮询 /health（最多 ~4s）。env 同时给定数据目录与 lean 模式。
@@ -352,10 +373,22 @@ async fn get_status(state: tauri::State<'_, AppState>) -> Result<Value, String> 
 }
 
 #[tauri::command]
-fn quit_app(app: tauri::AppHandle, state: tauri::State<AppState>) {
-    shutdown_proxy();
+async fn quit_app(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    // 先隐藏窗口：视觉上立即消失。清理与 exit 交给后台线程，
+    // 避免同步等代理回包时窗口还停在屏幕上（点击→消失的体感延迟）。
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
     state.proxy.lock().unwrap().spawned = false;
-    app.exit(0);
+    let handle = app.clone();
+    thread::spawn(move || {
+        shutdown_proxy();
+        handle.exit(0);
+    });
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
