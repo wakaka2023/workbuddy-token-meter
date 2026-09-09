@@ -45,11 +45,16 @@ came from cache, and how many credits were billed, all at a glance.
 
 ## Installation
 
-Download the latest `token-widget_x64-setup.exe` from
-[Releases](https://github.com/wakaka2023/workbuddy-token-meter/releases). An MSI package is
-available as well.
+Download the installer from
+[Releases](https://github.com/wakaka2023/workbuddy-token-meter/releases) (Windows 10/11 x64):
+[token-widget_0.3.0_x64-setup.exe](https://github.com/wakaka2023/workbuddy-token-meter/releases/download/v0.3.0/token-widget_0.3.0_x64-setup.exe)
+(an [MSI](https://github.com/wakaka2023/workbuddy-token-meter/releases/download/v0.3.0/token-widget_0.3.0_x64_en-US.msi) package is also available).
 
 ## Usage
+
+> This tool tracks LLM usage for [WorkBuddy](https://www.workbuddy.cn) — install and use
+> WorkBuddy first so sessions exist. If the widget shows empty data on first launch,
+> go to **Settings → Stats → Full scan** to rebuild.
 
 | Action | Description |
 | --- | --- |
@@ -76,8 +81,7 @@ be rebuilt in seconds after a restart.
                                              └─────────────────────────┘
 ```
 
-The bundled proxy is spawned on demand, only for custom models that need local forwarding.
-Users on built-in models run without any child process.
+All statistics come from read-only session logs — no child process is spawned and no port is opened.
 
 ## Development
 

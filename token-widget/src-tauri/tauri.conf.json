@@ -41,7 +41,6 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/token-proxy.exe",
       "resources/config.json"
     ]
   }

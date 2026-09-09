@@ -40,10 +40,13 @@
 
 ## 安装
 
-从 [Releases](https://github.com/wakaka2023/workbuddy-token-meter/releases) 下载最新的
-`token-widget_x64-setup.exe` 安装即可，同时提供 MSI 安装包。
+从 [Releases](https://github.com/wakaka2023/workbuddy-token-meter/releases) 下载安装包即可，适用于 Windows 10/11 x64：
+[token-widget_0.3.0_x64-setup.exe](https://github.com/wakaka2023/workbuddy-token-meter/releases/download/v0.3.0/token-widget_0.3.0_x64-setup.exe)
+（同时提供 [MSI](https://github.com/wakaka2023/workbuddy-token-meter/releases/download/v0.3.0/token-widget_0.3.0_x64_en-US.msi) 安装包）。
 
 ## 使用
+
+> 本工具统计 WorkBuddy 的 LLM 用量，需先安装并使用 [WorkBuddy](https://www.workbuddy.cn) 产生会话数据。首次打开若显示为空，到 **设置 → 统计 → 全量扫描** 即可重建。
 
 | 操作 | 说明 |
 | --- | --- |
@@ -68,7 +71,7 @@ WorkBuddy 会把每次会话以 JSONL 追加写入本地目录。本工具只读
                                           └─────────────────────────┘
 ```
 
-仅当存在需要经本地代理转发的自定义模型时，才会按需拉起代理进程；纯内置模型用户全程无子进程。
+统计全程只读会话记录，不启动任何子进程、不占用端口。
 
 ## 开发
 
